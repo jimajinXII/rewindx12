@@ -3,7 +3,7 @@
    sauf les recherches de titres vers TMDB, AniList, Open Library, RAWG et TheSportsDB. */
 'use strict';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.2.1';
 const DAY = 86400000;
 
 /* =========================================================
@@ -1694,7 +1694,10 @@ async function init() {
   render();
   try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) { /* */ }
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
-    navigator.serviceWorker.register('sw.js').catch(() => {});
+    const hadSw = !!navigator.serviceWorker.controller; let reloading = false;
+    // nouvelle version installée : on recharge une fois, après avoir sauvegardé
+    navigator.serviceWorker.addEventListener('controllerchange', () => { if (!hadSw || reloading) return; reloading = true; Promise.resolve(flush()).finally(() => location.reload()); });
+    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then((r) => r.update()).catch(() => {});
   }
   if (navigator.onLine !== false) syncSport().catch(() => {});
   save();
