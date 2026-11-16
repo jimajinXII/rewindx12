@@ -3,7 +3,7 @@
    sauf les recherches de titres vers TMDB, AniList, Open Library, RAWG et TheSportsDB. */
 'use strict';
 
-const APP_VERSION = '1.2.1';
+const APP_VERSION = '1.3.0';
 const DAY = 86400000;
 
 /* =========================================================
@@ -30,6 +30,8 @@ const TEAMS = {
   milan: { key: 'milan', name: 'AC Milan', short: 'Milan', abbr: 'MIL', id: '133667', sport: 'foot', league: 'Serie A', total: 38, c1: '#B3122A', c2: '#151515' }
 };
 const DEFAULT_FEDS = [{ name: 'AEW', kind: 'major' }, { name: 'WWE', kind: 'major' }, { name: 'Stardom', kind: 'major' }, { name: 'APC', kind: 'inde' }, { name: 'KHAO', kind: 'inde' }];
+const CATCH_LEAGUES = { AEW: '4563', WWE: '4444' };
+const HEBDO_RX = /dynamite|collision|rampage|battle of the belts|raw\b|smackdown|nxt|main event|saturday night|evolve|speed|level up|roh tv|ring of honor/i;
 const CKINDS = { hebdo: 'Hebdo', ppv: 'PPV', show: 'Show' };
 const CK_RT = { hebdo: 120, ppv: 240, show: 180 };
 const ckXp = (kind) => kind === 'ppv' ? XP.catchPPV : kind === 'show' ? XP.catchShow : XP.catchHebdo;
@@ -67,7 +69,7 @@ function freshState() {
     version: 1, createdAt: now(), demo: false,
     settings: { tmdbKey: '', rawgKey: '', goals: { films: 4, tomes: 5, episodes: 0, matchs: 8 }, catchTrialStart: now() },
     items: {}, events: [], matches: {}, catchLog: [], shows: {}, feds: DEFAULT_FEDS.map((f) => Object.assign({}, f)), goalsByMonth: {}, unlocked: {}, lastLevel: 1,
-    lastExport: null, sportSync: 0, logos: {}, logoTry: {}
+    lastExport: null, sportSync: 0, logos: {}, logoTry: {}, catchFeed: {}, catchSync: {}
   };
 }
 let state = freshState();
@@ -109,7 +111,7 @@ function migrate(s) {
   out.settings.goals = Object.assign({ films: 4, tomes: 5, episodes: 0, matchs: 8 }, out.settings.goals || {});
   for (const k of ['items', 'matches', 'goalsByMonth', 'unlocked']) out[k] = out[k] || {};
   for (const k of ['events', 'catchLog']) out[k] = out[k] || [];
-  out.shows = out.shows || {};
+  out.shows = out.shows || {}; out.catchFeed = out.catchFeed || {}; out.catchSync = out.catchSync || {};
   if (!Array.isArray(out.feds) || !out.feds.length) out.feds = DEFAULT_FEDS.map((f) => Object.assign({}, f));
   // V1.2 : « événement » devient PPV, ou Show pour les indés
   out.catchLog.forEach((c) => { if (c.kind === 'event') c.kind = out.feds.some((f) => f.name === c.fed && f.kind === 'major') ? 'ppv' : 'show'; });
@@ -302,6 +304,42 @@ function catchRemove(id) {
   if (c && c.showId && state.shows[c.showId]) state.shows[c.showId].seen = null;
   state.catchLog = state.catchLog.filter((x) => x.id !== id); state.events = state.events.filter((e) => e.item !== 'c:' + id);
 }
+/* Shows AEW / WWE récupérés sur TheSportsDB (clé gratuite : plusieurs méthodes en repli) */
+function tsdbShow(ev, fed) {
+  let ts = ev.strTimestamp ? Date.parse(/Z|[+-]\d\d:?\d\d$/.test(ev.strTimestamp) ? ev.strTimestamp : ev.strTimestamp + 'Z') : Date.parse((ev.dateEvent || '') + 'T' + (ev.strTime || '01:00:00') + 'Z');
+  if (isNaN(ts)) ts = Date.parse(ev.dateEvent);
+  const name = String(ev.strEvent || '').replace(/^(AEW|WWE)\s*[:\-–]?\s*/i, '').trim() || ev.strEvent;
+  const img = ev.strPoster || ev.strThumb || ev.strSquare || ev.strFanart || '';
+  return { id: 'tsdb' + ev.idEvent, fed, name, kind: HEBDO_RX.test(ev.strEvent || '') ? 'hebdo' : 'ppv', ts, poster: img ? img.replace(/^http:/, 'https:') : '' };
+}
+async function syncCatch(fed, force) {
+  const lid = CATCH_LEAGUES[fed]; if (!lid) return 0;
+  if (!force && now() - (state.catchSync[fed] || 0) < 3 * 3600000) return 0;
+  state.catchSync[fed] = now();
+  const base = 'https://www.thesportsdb.com/api/v1/json/123/';
+  const found = {};
+  const take = (list) => (list || []).forEach((ev) => { if (ev && ev.idEvent && String(ev.idLeague || lid) === lid) { const sh = tsdbShow(ev, fed); if (!isNaN(sh.ts)) found[sh.id] = sh; } });
+  for (const ep of ['eventspastleague', 'eventsnextleague']) {
+    try { const r = await getJSON(`${base}${ep}.php?id=${lid}`); take(r.events || r.results); } catch (e) { /* limite ou hors ligne */ }
+  }
+  // repli : jour par jour sur les 10 derniers jours si la liste est vide ou trop courte
+  if (Object.values(found).filter((x) => x.ts < now()).length < 4) {
+    for (let i = 0; i <= 10; i++) {
+      const d = new Date(now() - i * DAY); const day = d.getUTCFullYear() + '-' + pad2(d.getUTCMonth() + 1) + '-' + pad2(d.getUTCDate());
+      try { const r = await getJSON(`${base}eventsday.php?d=${day}&l=${lid}`); take(r.events); } catch (e) { /* */ }
+    }
+  }
+  const list = Object.values(found);
+  if (list.length) {
+    const old = {}; (state.catchFeed[fed] || []).forEach((x) => { old[x.id] = x; });
+    list.forEach((x) => { old[x.id] = x; });
+    state.catchFeed[fed] = Object.values(old).filter((x) => x.ts > now() - 60 * DAY).sort((a, b) => b.ts - a.ts).slice(0, 40);
+  } else state.catchSync[fed] = now() - 2.5 * 3600000; // rien reçu : on réessaie dans 30 min
+  save();
+  if (ui.route === 'ajouter' && ui.add.type === 'catch') render();
+  return list.length;
+}
+
 /* Shows programmés (galas, PPV à venir) : on les confirme comme un match */
 function showsUpcoming() { const t = now(); return Object.values(state.shows).filter((s) => !s.seen && !s.dismissed && s.ts > t - 3 * 3600000).sort((a, b) => a.ts - b.ts); }
 function showsPending() { const t = now(); return Object.values(state.shows).filter((s) => !s.seen && !s.dismissed && s.ts <= t - 3 * 3600000 && s.ts > t - 14 * DAY).sort((a, b) => b.ts - a.ts); }
@@ -1011,7 +1049,8 @@ function viewAjouter(arg) {
   let h = `<div class="row"><button class="icon-btn dark" data-a="back" aria-label="Retour">${svgIcon('back', 20)}</button><h1 class="h1 grow" style="font-size:34px">Ajouter</h1></div>
     <div class="chips" role="group" aria-label="Type">${ADD_TYPES.map((t) => `<button class="chip ${a.type === t ? 'on' : ''}" data-a="add-type" data-v="${t}">${t === 'sport' ? 'Match' : t === 'catch' ? 'Catch' : esc(TYPES[t].label)}</button>`).join('')}</div>`;
   if (a.type === 'sport') return `<main class="view">${h}${matchForm()}</main>`;
-  if (a.type === 'catch') return `<main class="view">${h}${catchForm()}</main>`;
+  if (a.type === 'catch') { if (!a.fed || !state.feds.some((f) => f.name === a.fed)) a.fed = state.feds[0] ? state.feds[0].name : 'AEW';
+    if (!a.cplan && CATCH_LEAGUES[a.fed]) setTimeout(() => syncCatch(a.fed).catch(() => {}), 0); return `<main class="view">${h}${catchForm()}</main>`; }
   if (a.picked) return `<main class="view">${h}${pickedPanel()}</main>`;
   if (a.manual) return `<main class="view">${h}${manualForm()}</main>`;
   h += `<form class="search" data-form="search"><label class="grow"><span class="sr">Rechercher</span><input class="input" name="q" value="${esc(a.q)}" placeholder="Titre à rechercher…" autocomplete="off" enterkeyhint="search"></label><button class="icon-btn" style="width:48px;height:48px;border-radius:14px" type="submit" aria-label="Rechercher">${svgIcon('search', 20)}</button></form>`;
@@ -1075,7 +1114,7 @@ function posterField(cur) {
   return `<div class="field"><span>Affiche (facultatif)</span>
     <div class="row" style="gap:12px;align-items:center"><div class="poster sm" data-poster-preview style="background:${grad('affiche')}">${cur ? `<img src="${esc(cur)}" alt="">` : `<span class="ph">${svgIcon('upload', 18)}</span>`}</div>
       <div class="col grow" style="gap:8px"><label class="btn" style="cursor:pointer">${svgIcon('upload', 18)}Choisir une image<input type="file" accept="image/*" data-change="poster-file" class="sr"></label>
-      <input class="input" name="posterUrl" data-keep="url" placeholder="ou colle un lien d’image" autocomplete="off" inputmode="url"></div></div>
+      <input class="input" name="posterUrl" data-keep="url" value="${cur && !cur.startsWith('data:') && ui.route === 'ajouter' ? esc(cur) : ''}" placeholder="ou colle un lien d’image" autocomplete="off" inputmode="url"></div></div>
     <input type="hidden" name="posterData" value="${cur && cur.startsWith('data:') ? esc(cur) : ''}"></div>`;
 }
 function catchForm() {
@@ -1088,6 +1127,7 @@ function catchForm() {
   return `<form class="col" style="gap:14px" data-form="catch-add">
     <div class="seg"><button type="button" class="${plan ? '' : 'on'}" data-a="catch-plan" data-v="0">Déjà vu</button><button type="button" class="${plan ? 'on' : ''}" data-a="catch-plan" data-v="1">À venir</button></div>
     <div class="field"><span>Fédération</span><div class="chips">${state.feds.map((f) => `<button type="button" class="chip ${a.fed === f.name ? 'on' : ''}" data-a="catch-fed" data-v="${esc(f.name)}">${esc(f.name)}</button>`).join('')}<button type="button" class="chip" data-a="feds-open">+ Fédération</button></div></div>
+    ${!plan && CATCH_LEAGUES[a.fed] ? feedPicker(a.fed) : ''}
     <div class="field"><span>Type</span>${major
       ? `<div class="seg"><button type="button" class="${kind === 'hebdo' ? 'on' : ''}" data-a="catch-kind" data-v="hebdo">Hebdo (+${XP.catchHebdo} XP)</button><button type="button" class="${kind === 'ppv' ? 'on' : ''}" data-a="catch-kind" data-v="ppv">PPV (+${XP.catchPPV} XP)</button></div>`
       : `<div class="pill" style="align-self:flex-start">Show (+${XP.catchShow} XP)</div>`}</div>
@@ -1099,6 +1139,16 @@ function catchForm() {
     ${plan ? '' : `<label class="field"><span>Un mot (facultatif)</span><input class="input" name="note" data-keep="note" value="${esc(cf.note || '')}" placeholder="Ex. main event incroyable"></label>`}
     <button class="btn chrome block" type="submit">${plan ? 'Programmer le show' : 'Noter dans le journal'}</button>
     <span class="small muted">${plan ? 'Le jour J, le show apparaît dans En cours. Une fois passé, Rewind te demande si tu l’as vu.' : 'Pour AEW Dynamite, utilise plutôt sa fiche dans Biblio › Catch : chaque épisode s’y coche comme une série.'}</span></form>`;
+}
+function feedPicker(fed) {
+  const feed = (state.catchFeed[fed] || []).filter((x) => x.ts < now() + 3 * 3600000 && x.ts > now() - 30 * DAY);
+  const noted = new Set(state.catchLog.map((c) => c.tsdbId).filter(Boolean));
+  const loading = now() - (state.catchSync[fed] || 0) < 8000 && !feed.length;
+  let h = `<div class="field"><div class="row between"><span>Shows récents ${esc(fed)}</span><button type="button" class="link" data-a="catch-feed-sync" data-v="${esc(fed)}">${svgIcon('sync', 14)} Actualiser</button></div>`;
+  if (!feed.length) h += `<div class="empty" style="padding:14px">${loading ? 'Recherche des derniers shows…' : 'Aucun show récupéré pour l’instant. Touche « Actualiser », ou remplis à la main ci-dessous.'}</div>`;
+  else h += `<div class="feed">${feed.slice(0, 14).map((x) => `<button type="button" class="feed-it ${ui.add.cpick === x.id ? 'on' : ''}" data-a="catch-pick" data-id="${x.id}" ${noted.has(x.id) ? 'disabled' : ''}>
+      ${x.poster ? `<img src="${esc(x.poster)}" alt="" loading="lazy">` : ''}<span class="label ${x.kind === 'ppv' ? 'amber' : 'cyan'}">${esc(CKINDS[x.kind])}${noted.has(x.id) ? ' · noté' : ''}</span><b>${esc(x.name)}</b><span class="small muted">${esc(fmtDay(x.ts))}</span></button>`).join('')}</div>`;
+  return h + `</div>`;
 }
 function fedsModal() {
   openModal('Fédérations', `<div class="col" style="gap:10px">${state.feds.map((f, i) => `<div class="card-row" style="padding:8px 10px"><b class="grow">${esc(f.name)}</b>
@@ -1384,9 +1434,17 @@ const ACT = {
   reveal(d) { ui.reveal[d.id] = true; render(); },
   async 'sport-sync'() { toast('Récupération des matchs…', '', 1400); const ok = await syncSport(true); toast(ok ? 'Matchs à jour' : 'Impossible de joindre TheSportsDB pour le moment.', '', 2600); },
   'catch-del'(d) { confirmBox('Supprimer cette entrée ?', 'L’entrée et son XP seront retirées du journal.', 'Supprimer', () => { catchRemove(d.id); checkUnlocks(true); save(); closeModal(); }, true); },
-  'catch-fed'(d) { ui.add.fed = d.v; render(); },
+  'catch-fed'(d) { ui.add.fed = d.v; ui.add.cpick = null; render(); if (CATCH_LEAGUES[d.v]) syncCatch(d.v); },
   'catch-kind'(d) { ui.add.ckind = d.v; render(); },
   'catch-plan'(d) { ui.add.cplan = d.v === '1'; render(); },
+  'catch-feed-sync'(d) { toast('Recherche des shows ' + esc(d.v) + '…', '', 1400); syncCatch(d.v, true).then((n) => { if (!n) toast('TheSportsDB n’a rien renvoyé pour le moment.', '', 2800); render(); }); render(); },
+  'catch-pick'(d) {
+    const a = ui.add; const x = (state.catchFeed[a.fed] || []).find((y) => y.id === d.id); if (!x) return;
+    const dt = new Date(x.ts);
+    a.cpick = x.id; a.ckind = x.kind; a.cposter = x.poster || '';
+    a.cf = Object.assign(a.cf || {}, { show: x.name, date: dt.getFullYear() + '-' + pad2(dt.getMonth() + 1) + '-' + pad2(dt.getDate()), time: pad2(dt.getHours()) + ':' + pad2(dt.getMinutes()) });
+    render();
+  },
   'feds-open'() { fedsModal(); },
   'fed-kind'(d) { state.feds[+d.i].kind = d.v; save(); fedsModal(); },
   'fed-del'(d) { if (state.feds.length <= 1) return; state.feds.splice(+d.i, 1); save(); fedsModal(); },
@@ -1489,9 +1547,10 @@ const FORMS = {
       const id = uid(); state.shows[id] = { id, fed, name, kind, ts, poster, seen: null, dismissed: false, createdAt: now() };
       save(); toast(esc(name) + ' programmé', '', 2200);
     } else {
-      withXp(() => catchAdd({ fed, show: name, kind, mode: fd.get('mode'), note: String(fd.get('note') || '').trim(), ts, poster }));
+      const pick = a.cpick && (state.catchFeed[fed] || []).find((y) => y.id === a.cpick && y.name === name);
+      withXp(() => catchAdd({ fed, show: name, kind, mode: fd.get('mode'), note: String(fd.get('note') || '').trim(), ts, poster: poster || (pick ? pick.poster : ''), tsdbId: pick ? pick.id : undefined }));
     }
-    a.cf = {}; a.cposter = ''; a.cplan = false;
+    a.cf = {}; a.cposter = ''; a.cplan = false; a.cpick = null;
     ui.biblio.type = 'catch'; location.hash = '#biblio';
   },
   'fed-add'(fd) {
