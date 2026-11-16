@@ -3,7 +3,8 @@
    sauf les recherches de titres vers TMDB, AniList, Open Library, RAWG et TheSportsDB. */
 'use strict';
 
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.5.0';
+const ANIME_TMDB = true; // anime : épisodes via TMDB quand la clé est là
 const DAY = 86400000;
 
 /* =========================================================
@@ -524,7 +525,7 @@ async function buildFromResult(type, r, opt) {
     base.overview = d.overview || base.overview; base.syncedAt = now();
     return base;
   }
-  if (r.src.api === 'anilist' && type === 'anime' && (state.settings.tmdbKey || '').trim()) {
+  if (ANIME_TMDB && r.src.api === 'anilist' && type === 'anime' && (state.settings.tmdbKey || '').trim()) {
     try {
       const c = await tmdbAnimeCandidates(r.alt && r.alt.length ? r.alt : [r.title], r.year);
       if (c[0] && c[0].score >= 8) {
@@ -628,7 +629,7 @@ async function linkAnimeTmdb(it, tvId) {
   Object.keys(seasonLoading).forEach((k) => { if (k.startsWith(it.id + ':')) delete seasonLoading[k]; });
 }
 async function autoLinkAnime(it) {
-  if (it.type !== 'anime' || !it.src || it.src.api !== 'anilist' || it.tmdbTried || !(state.settings.tmdbKey || '').trim()) return;
+  if (!ANIME_TMDB || it.type !== 'anime' || !it.src || it.src.api !== 'anilist' || it.tmdbTried || !(state.settings.tmdbKey || '').trim()) return;
   it.tmdbTried = true; save();
   try {
     const c = await tmdbAnimeCandidates([it.title].concat(it.altTitles || []), it.year);
@@ -736,13 +737,13 @@ function teamDisc(name, team, cls, id) {
   const ring = t ? `;box-shadow:inset 0 0 0 3px ${t.c2}` : '';
   return `<div class="${c}" style="background:${bg}${ring}" aria-hidden="true">${esc(t ? t.abbr : abbr(name))}</div>`;
 }
-async function imageToDataUrl(file, maxW) {
-  maxW = maxW || 480;
+async function imageToDataUrl(file, maxW, maxH) {
+  maxW = maxW || 480; maxH = maxH || 4000;
   const url = URL.createObjectURL(file);
   try {
     const img = new Image();
     await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url; });
-    const k = Math.min(1, maxW / img.naturalWidth);
+    const k = Math.min(1, maxW / img.naturalWidth, maxH / img.naturalHeight);
     const c = document.createElement('canvas'); c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
     c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
     return c.toDataURL('image/jpeg', 0.82);
@@ -1179,12 +1180,13 @@ function matchForm() {
     <label class="field"><span>Vu en</span><select class="input" name="mode"><option value="direct">Direct</option><option value="differe" selected>Différé</option><option value="resume">Résumé</option><option value="">Pas encore vu</option></select></label>
     <button class="btn chrome block" type="submit">Ajouter le match</button></form>`;
 }
-function posterField(cur) {
-  return `<div class="field"><span>Affiche (facultatif)</span>
-    <div class="row" style="gap:12px;align-items:center"><div class="poster sm" data-poster-preview style="background:${grad('affiche')}">${cur ? `<img src="${esc(cur)}" alt="">` : `<span class="ph">${svgIcon('upload', 18)}</span>`}</div>
-      <div class="col grow" style="gap:8px"><label class="btn" style="cursor:pointer">${svgIcon('upload', 18)}Choisir une image<input type="file" accept="image/*" data-change="poster-file" class="sr"></label>
-      <input class="input" name="posterUrl" data-keep="url" value="${cur && !cur.startsWith('data:') && ui.route === 'ajouter' ? esc(cur) : ''}" placeholder="ou colle un lien d’image" autocomplete="off" inputmode="url"></div></div>
-    <input type="hidden" name="posterData" value="${cur && cur.startsWith('data:') ? esc(cur) : ''}"></div>`;
+function posterField(cur, f) {
+  f = f || 'poster'; const wide = f === 'backdrop';
+  return `<div class="field"><span>${wide ? 'Bannière' : 'Affiche'} (facultatif)</span>
+    <div class="row" style="gap:12px;align-items:center"><div class="poster ${wide ? 'wide' : 'sm'}" data-preview="${f}" style="background:${grad(wide ? 'banniere' : 'affiche')}">${cur ? `<img src="${esc(cur)}" alt="">` : `<span class="ph">${svgIcon('upload', 18)}</span>`}</div>
+      <div class="col grow" style="gap:8px"><label class="btn" style="cursor:pointer">${svgIcon('upload', 18)}Choisir une image<input type="file" accept="image/*" data-change="poster-file" data-field="${f}" class="sr"></label>
+      <input class="input" name="${f}Url" ${f === 'poster' ? 'data-keep="url"' : ''} value="${cur && !cur.startsWith('data:') && ui.route === 'ajouter' ? esc(cur) : ''}" placeholder="ou colle un lien d’image" autocomplete="off" inputmode="url"></div></div>
+    <input type="hidden" name="${f}Data" value="${cur && cur.startsWith('data:') ? esc(cur) : ''}"></div>`;
 }
 function catchForm() {
   const a = ui.add; const cf = a.cf || (a.cf = {});
@@ -1241,7 +1243,7 @@ function viewItem(id) {
   if (!it) return `<main class="view"><div class="empty">Cette œuvre n’existe plus.<br><a href="#biblio">Retour à la bibliothèque</a></div></main>`;
   const sh = shape(it); const p = progress(it); const pass = curPass(it);
   const bg = it.backdrop || it.poster;
-  if (it.type === 'anime' && it.src && it.src.api === 'anilist' && !it.tmdbTried) setTimeout(() => autoLinkAnime(it), 0);
+  if (ANIME_TMDB && it.type === 'anime' && it.src && it.src.api === 'anilist' && !it.tmdbTried) setTimeout(() => autoLinkAnime(it), 0);
   let h = `<section class="detail-hero" aria-label="${esc(it.title)}"><div class="bg" style="background:${grad(it.title)}">${bg ? `<img src="${esc(bg)}" alt="" loading="lazy">` : ''}</div>
     <button class="icon-btn dark back" data-a="back" aria-label="Retour">${svgIcon('back', 20)}</button>
     <button class="icon-btn dark menu" data-a="item-menu" data-id="${it.id}" aria-label="Options">${svgIcon('dots', 22)}</button>
@@ -1274,7 +1276,7 @@ function episodesBlock(it) {
   ui.season[it.id] = sn;
   const s = it.seasons.find((x) => x.n === sn);
   let h = '';
-  if (it.type === 'anime' && it.src && it.src.api === 'anilist' && it.tmdbTried && (state.settings.tmdbKey || '').trim()) {
+  if (ANIME_TMDB && it.type === 'anime' && it.src && it.src.api === 'anilist' && it.tmdbTried && (state.settings.tmdbKey || '').trim()) {
     h += `<div class="banner info">${svgIcon('tv', 18)}<span class="grow">Titres et miniatures des épisodes disponibles via TMDB.</span><button class="link" data-a="anime-link" data-id="${it.id}">Choisir</button></div>`;
   }
   if (it.seasons.length > 1) {
@@ -1492,6 +1494,8 @@ const ACT = {
       ${sh === 'tomes' || sh === 'livre' ? `<label class="field"><span>Nombre de tomes</span><input class="input" name="tomes" type="number" min="1" max="300" value="${it.volumes.length}"></label>` : ''}
       ${sh === 'livre' ? `<label class="field"><span>Pages par tome</span><input class="input" name="pages" type="number" min="0" value="${esc(it.volumes[0] ? it.volumes[0].pages || '' : '')}"></label>` : ''}
       ${posterField(it.poster)}
+      ${posterField(it.backdrop, 'backdrop')}
+      ${it.backdrop ? `<label class="toggle"><input type="checkbox" name="noBackdrop"><span class="sw"></span><span class="grow"><b style="font-size:14px">Retirer la bannière</b><br><span class="small muted">L’affiche sera utilisée à la place.</span></span></label>` : ''}
       ${sh === 'episodes' || sh === 'tomes' || sh === 'livre' ? `<label class="toggle"><input type="checkbox" name="ended" ${it.ended ? 'checked' : ''}><span class="sw"></span><span class="grow"><b style="font-size:14px">Terminée (plus de suite prévue)</b></span></label>` : ''}
       <div class="grid2"><button class="btn" type="button" data-a="modal-close">Annuler</button><button class="btn chrome" type="submit">Enregistrer</button></div></form>`);
   },
@@ -1661,6 +1665,8 @@ const FORMS = {
     it.title = String(fd.get('title')).trim() || it.title;
     const poster = String(fd.get('posterData') || '').trim() || String(fd.get('posterUrl') || '').trim();
     if (poster) it.poster = poster;
+    const banner = String(fd.get('backdropData') || '').trim() || String(fd.get('backdropUrl') || '').trim();
+    if (fd.get('noBackdrop')) it.backdrop = ''; else if (banner) it.backdrop = banner;
     if (fd.has('seasons')) { const c = String(fd.get('seasons')).split(/[,;\s]+/).map(Number).filter((n) => n > 0); if (c.length) it.seasons = c.map((n, i) => Object.assign(it.seasons[i] || { n: i + 1, name: 'Saison ' + (i + 1), eps: null }, { count: n })); }
     if (fd.has('tomes')) { const n = clamp(+fd.get('tomes') || 1, 1, 300); const pages = fd.has('pages') ? +fd.get('pages') || 0 : 0; it.volumes = Array.from({ length: n }, (_, i) => Object.assign({ n: i + 1, pages }, it.volumes[i] || {}, sh === 'livre' && fd.has('pages') ? { pages } : {})); }
     if (sh === 'episodes' || sh === 'tomes' || sh === 'livre') it.ended = !!fd.get('ended');
@@ -1738,11 +1744,11 @@ document.addEventListener('change', (e) => {
   if (a === 'add-catchup') { ui.add.catchup = el.checked; }
   if (a === 'poster-file') {
     const file = el.files && el.files[0]; if (!file) return;
-    const form = el.closest('form');
-    imageToDataUrl(file).then((data) => {
-      if (form && form.elements.posterData) form.elements.posterData.value = data;
-      const pv = form && form.querySelector('[data-poster-preview]'); if (pv) pv.innerHTML = `<img src="${data}" alt="">`;
-      if (form && form.dataset.form === 'catch-add') ui.add.cposter = data;
+    const form = el.closest('form'); const f = el.dataset.field || 'poster';
+    imageToDataUrl(file, f === 'backdrop' ? 960 : 480, f === 'backdrop' ? 600 : 4000).then((data) => {
+      if (form && form.elements[f + 'Data']) form.elements[f + 'Data'].value = data;
+      const pv = form && form.querySelector(`[data-preview="${f}"]`); if (pv) pv.innerHTML = `<img src="${data}" alt="">`;
+      if (form && form.dataset.form === 'catch-add' && f === 'poster') ui.add.cposter = data;
     }).catch(() => toast('Image illisible.', '', 2600));
     el.value = '';
   }

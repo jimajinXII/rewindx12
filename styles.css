@@ -280,3 +280,4 @@ button.card-row { color: inherit; font: inherit; cursor: pointer; }
 .feed-it .label { font-size: 10px; }
 .feed-it.on { box-shadow: inset 0 0 0 2px var(--cyan); background: rgba(127, 214, 240, .14); }
 .feed-it:disabled { opacity: .45; cursor: default; }
+.poster.wide { width: 96px; height: 54px; border-radius: 8px; }
