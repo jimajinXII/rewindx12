@@ -22,14 +22,18 @@ const TYPES = {
 };
 const ADD_TYPES = ['film', 'serie', 'anime', 'doc', 'livre', 'bd', 'manga', 'jeu', 'sport', 'catch'];
 const XP = { ep: { serie: 10, anime: 8, doc: 10, catch: 10 }, film: 30, tome: 15, jeu: 100, match: 25, matchResume: 5,
-  catchHebdo: 10, catchEvent: 25, catchResume: 5, bonusSaison: 50, bonusSerie: 150, bonusSaga: 150, bonusSagaLivre: 300,
+  catchHebdo: 10, catchPPV: 25, catchShow: 20, catchResume: 5, bonusSaison: 50, bonusSerie: 150, bonusSaga: 150, bonusSagaLivre: 300,
   goal: 100, livreFin: 25 };
 const RUNTIME = { serie: 42, anime: 24, doc: 50, catch: 120, film: 110 };
 const TEAMS = {
   sixers: { key: 'sixers', name: 'Philadelphia 76ers', short: 'Sixers', abbr: 'PHI', id: '134863', sport: 'nba', league: 'NBA', total: 82, c1: '#1D5FBF', c2: '#E8475F' },
   milan: { key: 'milan', name: 'AC Milan', short: 'Milan', abbr: 'MIL', id: '133667', sport: 'foot', league: 'Serie A', total: 38, c1: '#B3122A', c2: '#151515' }
 };
-const FEDS = ['AEW', 'Stardom', 'WWE', 'APC', 'KHAO', 'Autre'];
+const DEFAULT_FEDS = [{ name: 'AEW', kind: 'major' }, { name: 'WWE', kind: 'major' }, { name: 'Stardom', kind: 'major' }, { name: 'APC', kind: 'inde' }, { name: 'KHAO', kind: 'inde' }];
+const CKINDS = { hebdo: 'Hebdo', ppv: 'PPV', show: 'Show' };
+const CK_RT = { hebdo: 120, ppv: 240, show: 180 };
+const ckXp = (kind) => kind === 'ppv' ? XP.catchPPV : kind === 'show' ? XP.catchShow : XP.catchHebdo;
+const fedKind = (name) => { const f = (state.feds || []).find((x) => x.name.toLowerCase() === String(name).toLowerCase()); return f ? f.kind : 'inde'; };
 const MODES = { direct: 'Direct', differe: 'Différé', resume: 'Résumé' };
 const GOAL_LABELS = { films: 'Films', tomes: 'Tomes et livres', episodes: 'Épisodes', matchs: 'Matchs' };
 const IMG = { poster: 'https://image.tmdb.org/t/p/w342', backdrop: 'https://image.tmdb.org/t/p/w780', still: 'https://image.tmdb.org/t/p/w300' };
@@ -62,7 +66,7 @@ function freshState() {
   return {
     version: 1, createdAt: now(), demo: false,
     settings: { tmdbKey: '', rawgKey: '', goals: { films: 4, tomes: 5, episodes: 0, matchs: 8 }, catchTrialStart: now() },
-    items: {}, events: [], matches: {}, catchLog: [], goalsByMonth: {}, unlocked: {}, lastLevel: 1,
+    items: {}, events: [], matches: {}, catchLog: [], shows: {}, feds: DEFAULT_FEDS.map((f) => Object.assign({}, f)), goalsByMonth: {}, unlocked: {}, lastLevel: 1,
     lastExport: null, sportSync: 0, logos: {}, logoTry: {}
   };
 }
@@ -105,6 +109,11 @@ function migrate(s) {
   out.settings.goals = Object.assign({ films: 4, tomes: 5, episodes: 0, matchs: 8 }, out.settings.goals || {});
   for (const k of ['items', 'matches', 'goalsByMonth', 'unlocked']) out[k] = out[k] || {};
   for (const k of ['events', 'catchLog']) out[k] = out[k] || [];
+  out.shows = out.shows || {};
+  if (!Array.isArray(out.feds) || !out.feds.length) out.feds = DEFAULT_FEDS.map((f) => Object.assign({}, f));
+  // V1.2 : « événement » devient PPV, ou Show pour les indés
+  out.catchLog.forEach((c) => { if (c.kind === 'event') c.kind = out.feds.some((f) => f.name === c.fed && f.kind === 'major') ? 'ppv' : 'show'; });
+  out.events.forEach((e) => { if (e.kind === 'catch' && e.catchKind === 'event') { const c = out.catchLog.find((x) => 'c:' + x.id === e.item); e.catchKind = c ? c.kind : 'ppv'; } });
   return out;
 }
 
@@ -283,11 +292,25 @@ function pendingMatches() {
 function catchAdd(entry) {
   const e = Object.assign({ id: uid(), ts: now() }, entry);
   state.catchLog.push(e);
-  const xp = e.mode === 'resume' ? XP.catchResume : e.kind === 'event' ? XP.catchEvent : XP.catchHebdo;
+  const xp = e.mode === 'resume' ? XP.catchResume : ckXp(e.kind);
   state.events.push({ id: uid(), ts: e.ts, item: 'c:' + e.id, key: 'seen', kind: 'catch', type: 'catch', fed: e.fed, show: e.show,
-    catchKind: e.kind, mode: e.mode, xp, legacy: false, rewatch: false, rt: e.kind === 'event' ? 240 : 120 });
+    catchKind: e.kind, mode: e.mode, xp, legacy: false, rewatch: false, rt: e.mode === 'resume' ? 20 : CK_RT[e.kind] || 120 });
+  return e;
 }
-function catchRemove(id) { state.catchLog = state.catchLog.filter((c) => c.id !== id); state.events = state.events.filter((e) => e.item !== 'c:' + id); }
+function catchRemove(id) {
+  const c = state.catchLog.find((x) => x.id === id);
+  if (c && c.showId && state.shows[c.showId]) state.shows[c.showId].seen = null;
+  state.catchLog = state.catchLog.filter((x) => x.id !== id); state.events = state.events.filter((e) => e.item !== 'c:' + id);
+}
+/* Shows programmés (galas, PPV à venir) : on les confirme comme un match */
+function showsUpcoming() { const t = now(); return Object.values(state.shows).filter((s) => !s.seen && !s.dismissed && s.ts > t - 3 * 3600000).sort((a, b) => a.ts - b.ts); }
+function showsPending() { const t = now(); return Object.values(state.shows).filter((s) => !s.seen && !s.dismissed && s.ts <= t - 3 * 3600000 && s.ts > t - 14 * DAY).sort((a, b) => b.ts - a.ts); }
+function showSee(s, mode) {
+  const ts = mode === 'direct' ? Math.min(now(), s.ts + 3 * 3600000) : now();
+  const c = catchAdd({ fed: s.fed, show: s.name, kind: s.kind, mode, ts, poster: s.poster || '', showId: s.id });
+  s.seen = { mode, logId: c.id }; s.dismissed = false;
+}
+function showUnsee(s) { if (s.seen) catchRemove(s.seen.logId); s.seen = null; }
 
 /* =========================================================
    5. Statistiques, objectifs, niveaux, badges
@@ -424,10 +447,21 @@ async function search(type, q) {
       ended: m.status === 'FINISHED', sub: type === 'anime' ? (m.episodes ? m.episodes + ' ép.' : 'En cours de diffusion') : (m.volumes ? m.volumes + ' tomes' : m.status === 'FINISHED' ? 'Terminé' : 'En cours de parution') }));
   }
   if (type === 'livre' || type === 'bd') {
-    const r = await getJSON('https://openlibrary.org/search.json?limit=15&fields=key,title,author_name,cover_i,number_of_pages_median,first_publish_year&q=' + encodeURIComponent(q));
-    return (r.docs || []).map((b) => ({ src: { api: 'ol', id: b.key }, title: b.title, year: b.first_publish_year || '',
+    const [gb, ol] = await Promise.allSettled([
+      getJSON('https://www.googleapis.com/books/v1/volumes?printType=books&maxResults=15&q=' + encodeURIComponent(q)),
+      getJSON('https://openlibrary.org/search.json?limit=15&fields=key,title,author_name,cover_i,number_of_pages_median,first_publish_year&q=' + encodeURIComponent(q))
+    ]);
+    if (gb.status === 'rejected' && ol.status === 'rejected') throw gb.reason;
+    const out = []; const seen = new Set();
+    const push = (r) => { const k = r.title.toLowerCase() + '|' + String(r.sub).toLowerCase().split(',')[0]; if (seen.has(k)) return; seen.add(k); out.push(r); };
+    if (gb.status === 'fulfilled') (gb.value.items || []).forEach((b) => { const v = b.volumeInfo || {}; if (!v.title) return;
+      const img = v.imageLinks && (v.imageLinks.thumbnail || v.imageLinks.smallThumbnail);
+      push({ src: { api: 'gb', id: b.id }, title: v.title + (v.subtitle && v.title.length < 40 ? ' – ' + v.subtitle : ''), year: (v.publishedDate || '').slice(0, 4),
+        poster: img ? img.replace(/^http:/, 'https:').replace('&edge=curl', '').replace('zoom=1', 'zoom=2') : '', pages: v.pageCount || 0, sub: (v.authors || []).slice(0, 2).join(', ') }); });
+    if (ol.status === 'fulfilled') (ol.value.docs || []).forEach((b) => push({ src: { api: 'ol', id: b.key }, title: b.title, year: b.first_publish_year || '',
       poster: b.cover_i ? 'https://covers.openlibrary.org/b/id/' + b.cover_i + '-L.jpg' : '', pages: b.number_of_pages_median || 0,
       sub: (b.author_name || []).slice(0, 2).join(', ') }));
+    return out.slice(0, 20);
   }
   if (type === 'jeu') {
     const key = (state.settings.rawgKey || '').trim(); if (!key) throw new Error('NOKEY_RAWG');
@@ -595,6 +629,28 @@ function teamDisc(name, team, cls, id) {
   const ring = t ? `;box-shadow:inset 0 0 0 3px ${t.c2}` : '';
   return `<div class="${c}" style="background:${bg}${ring}" aria-hidden="true">${esc(t ? t.abbr : abbr(name))}</div>`;
 }
+async function imageToDataUrl(file, maxW) {
+  maxW = maxW || 480;
+  const url = URL.createObjectURL(file);
+  try {
+    const img = new Image();
+    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url; });
+    const k = Math.min(1, maxW / img.naturalWidth);
+    const c = document.createElement('canvas'); c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    return c.toDataURL('image/jpeg', 0.82);
+  } finally { URL.revokeObjectURL(url); }
+}
+function importPack(data) {
+  let n = 0;
+  (data.feds || []).forEach((f) => { if (f && f.name && !state.feds.some((x) => x.name.toLowerCase() === f.name.toLowerCase())) state.feds.push({ name: f.name, kind: f.kind === 'major' ? 'major' : 'inde' }); });
+  (data.shows || []).forEach((sh) => {
+    if (!sh || !sh.name || !sh.ts) return;
+    const id = sh.id || uid(); if (state.shows[id]) return;
+    state.shows[id] = { id, fed: sh.fed || 'Autre', name: sh.name, kind: CKINDS[sh.kind] ? sh.kind : 'show', ts: sh.ts, poster: sh.poster || '', seen: null, dismissed: false, createdAt: now() }; n++;
+  });
+  save(); render(); return n;
+}
 function toast(html, kind, ms) {
   const box = document.getElementById('toasts'); if (!box) return;
   const el = document.createElement('div'); el.className = 'toast ' + (kind || ''); el.innerHTML = html; box.appendChild(el);
@@ -650,7 +706,7 @@ function viewEncours() {
   const pend = pendingMatches().slice(0, 3);
   const mk = monthKey(now()); const goals = goalResults(mk);
   let h = `<div class="head"><h1 class="h1">En cours</h1>${levelChip()}</div>${demoBanner()}`;
-  if (!userItems.length && !Object.keys(state.matches).length && !state.catchLog.length) {
+  if (!userItems.length && !Object.keys(state.matches).length && !state.catchLog.length && !Object.keys(state.shows).length) {
     h += `<section class="glass pad col" aria-label="Bienvenue"><span class="label cyan">Bienvenue sur Rewind</span>
       <p style="margin:0;line-height:1.5">Pour bien démarrer :</p>
       <ol style="margin:0;padding-left:20px;line-height:1.7;color:#CFE3EA">
@@ -662,6 +718,8 @@ function viewEncours() {
       <button class="btn block" data-a="load-demo">Essayer avec des données de démo</button></section>`;
   }
   pend.forEach((m) => { h += pendingCard(m); });
+  showsPending().slice(0, 3).forEach((s) => { h += showCard(s, true); });
+  showsUpcoming().filter((s) => s.ts < now() + 30 * DAY).slice(0, 2).forEach((s) => { h += showCard(s, false); });
   if (items.length) {
     const top = items[0]; const nx = nextUnit(top); const p = progress(top);
     const bg = top.backdrop || top.poster;
@@ -703,6 +761,23 @@ function pendingCard(m) {
       ${teamDisc(m.away, favTeamSide(m) === 'away' ? m.team : null, 'mini-team', m.awayId)}</a>
     <h2 class="h3" style="font-size:22px">Tu as vu ce match ?</h2>
     <div class="seg">${Object.keys(MODES).map((k) => `<button data-a="match-seen" data-id="${m.id}" data-mode="${k}">${MODES[k]}</button>`).join('')}<button data-a="match-dismiss" data-id="${m.id}">Pas vu</button></div>
+  </section>`;
+}
+
+function untilText(ts) {
+  const d0 = new Date(); d0.setHours(0, 0, 0, 0); const d1 = new Date(ts); d1.setHours(0, 0, 0, 0);
+  const n = Math.round((d1 - d0) / DAY);
+  return n <= 0 ? (ts > now() ? 'Ce soir' : 'En ce moment') : n === 1 ? 'Demain' : 'Dans ' + n + ' jours';
+}
+function showCard(s, pending) {
+  return `<section class="glass pad col" aria-label="${pending ? 'Show à confirmer' : 'Prochain show'}" style="gap:12px">
+    <button class="row show-head" data-a="show-open" data-id="${s.id}">${posterHtml(s.name, s.poster, 'md')}
+      <div class="col grow" style="gap:4px;text-align:left"><span class="label cyan">${esc(s.fed)} · ${esc(CKINDS[s.kind] || 'Show')}</span>
+        <span class="h3" style="font-size:24px;line-height:1.05">${esc(s.name)}</span>
+        <span class="small" style="color:#CFE3EA">${esc(fmtMatch(s.ts))}</span>
+        ${pending ? '' : `<span class="pill amber" style="align-self:flex-start;margin-top:4px">${esc(untilText(s.ts))}</span>`}</div></button>
+    ${pending ? `<h2 class="h3" style="font-size:22px">Tu as vu ce show ?</h2>
+    <div class="seg">${Object.keys(MODES).map((k) => `<button data-a="show-seen" data-id="${s.id}" data-mode="${k}">${MODES[k]}</button>`).join('')}<button data-a="show-dismiss" data-id="${s.id}">Pas vu</button></div>` : ''}
   </section>`;
 }
 
@@ -752,15 +827,20 @@ function catchSection() {
   let h = day <= 30
     ? `<div class="banner info">${svgIcon('clock', 18)}<span class="grow">Essai catch · jour ${day} / 30. Note tout ce que tu regardes, on fera le point à la fin.</span></div>`
     : `<div class="banner warn">${svgIcon('target', 18)}<span class="grow">Le mois d’essai est terminé : regarde le bilan ci-dessous pour décider de l’organisation.</span></div>`;
+  h += `<div class="row between"><span class="small muted">${plural(state.feds.length, 'fédération')} : ${esc(state.feds.map((f) => f.name).join(', '))}</span><button class="link" data-a="feds-open">Gérer</button></div>`;
   h += `<div class="row between"><h2 class="h2">Shows suivis</h2><button class="link" data-a="catch-new-show">+ Show suivi</button></div>`;
   shows.forEach((s) => { h += `<a class="card-row" href="#item-${s.id}">${itemPoster(s, 'sm')}<div class="col grow" style="gap:3px"><span class="label cyan">Hebdo</span><span style="font-weight:700">${esc(s.title)}</span><span class="small muted">${esc(progressText(s))}</span></div></a>`; });
+  const planned = Object.values(state.shows).filter((s) => !s.seen && !s.dismissed).sort((a, b) => a.ts - b.ts);
+  h += `<div class="row between"><h2 class="h2">À venir</h2><a class="link" href="#ajouter-catch" style="display:flex;align-items:center">+ Programmer</a></div>`;
+  if (!planned.length) h += `<div class="empty">Aucun show programmé. Ajoute le prochain gala ou PPV avec son affiche : il apparaîtra dans En cours le jour J.</div>`;
+  planned.forEach((s) => { h += `<button class="card-row" data-a="show-open" data-id="${s.id}" style="width:100%;text-align:left">${posterHtml(s.name, s.poster, 'sm')}<div class="col grow" style="gap:3px"><span class="label">${esc(fmtMatch(s.ts))} · ${esc(s.fed)} · ${esc(CKINDS[s.kind] || 'Show')}</span><span style="font-weight:700">${esc(s.name)}</span></div><span class="pill ${s.ts < now() ? 'amber' : ''}">${s.ts < now() ? 'À confirmer' : esc(untilText(s.ts))}</span></button>`; });
   const log = state.catchLog.slice().sort((a, b) => b.ts - a.ts);
   const byFed = {}; log.forEach((c) => { byFed[c.fed] = (byFed[c.fed] || 0) + 1; });
   h += `<div class="row between"><h2 class="h2">Journal</h2><a class="link" href="#ajouter-catch" style="display:flex;align-items:center">+ Noter</a></div>`;
   if (Object.keys(byFed).length) h += `<div class="chips">${Object.entries(byFed).map(([f, n]) => `<span class="chip" style="display:flex;align-items:center">${esc(f)} · ${n}</span>`).join('')}</div>`;
-  if (!log.length) h += `<div class="empty">Rien de noté pour l’instant. Touche + pour ajouter un show ou un événement.</div>`;
+  if (!log.length) h += `<div class="empty">Rien de noté pour l’instant. Touche + pour noter un show, un PPV ou un gala.</div>`;
   log.forEach((c) => {
-    h += `<div class="card-row">${teamDisc(c.fed, null, 'mini-team')}<div class="col grow" style="gap:3px"><span class="label">${esc(fmtDay(c.ts))} · ${esc(c.fed)} · ${c.kind === 'event' ? 'Événement' : 'Show'}</span>
+    h += `<div class="card-row">${c.poster ? posterHtml(c.show || c.fed, c.poster, 'sm') : teamDisc(c.fed, null, 'mini-team')}<div class="col grow" style="gap:3px"><span class="label">${esc(fmtDay(c.ts))} · ${esc(c.fed)} · ${esc(CKINDS[c.kind] || 'Hebdo')}</span>
       <span style="font-weight:600">${esc(c.show || c.fed)}</span>${c.note ? `<span class="small muted">${esc(c.note)}</span>` : ''}</div><span class="pill cyan">${esc(MODES[c.mode])}</span>
       <button class="icon-btn dark" data-a="catch-del" data-id="${c.id}" aria-label="Supprimer">${svgIcon('trash', 18)}</button></div>`;
   });
@@ -792,9 +872,11 @@ function monthGroups(mk) {
   for (const [key, list] of groups) {
     const last = Math.max(...list.map((e) => e.ts)); const rw = list.some((e) => e.rewatch);
     if (key.startsWith('team:')) { const t = TEAMS[key.slice(5)]; const r = list.filter((e) => e.mode === 'resume').length;
-      out.push({ last, title: t.short, kind: t.league, poster: `<div class="poster fill" style="background:linear-gradient(160deg,${t.c1},${t.c2})" aria-hidden="true"><span class="ph" style="font-size:28px">${t.abbr}</span></div>`, detail: plural(list.length - r, 'match') + (r ? ' · ' + plural(r, 'résumé') : '') }); continue; }
+      out.push({ last, title: t.short, kind: t.league, poster: sportVignette(t, list), detail: plural(list.length - r, 'match') + (r ? ' · ' + plural(r, 'résumé') : '') }); continue; }
     if (key.startsWith('sport:')) { out.push({ last, title: key.slice(6) === 'nba' ? 'Basket' : key.slice(6) === 'foot' ? 'Football' : 'Sport', kind: 'SPORT', poster: posterHtml(key, '', 'fill'), detail: plural(list.length, 'match') }); continue; }
-    if (key.startsWith('fed:')) { out.push({ last, title: key.slice(4), kind: 'CATCH', poster: posterHtml(key.slice(4), '', 'fill'), detail: plural(list.length, 'show') }); continue; }
+    if (key.startsWith('fed:')) { const fed = key.slice(4);
+      const withPoster = list.slice().sort((a, b) => b.ts - a.ts).map((e) => state.catchLog.find((c) => 'c:' + c.id === e.item)).find((c) => c && c.poster);
+      out.push({ last, title: fed, kind: 'CATCH', poster: withPoster ? posterHtml(fed, withPoster.poster, 'fill') : fedVignette(fed), detail: plural(list.length, 'show') }); continue; }
     const it = state.items[key]; if (!it) continue;
     let detail = '';
     const k0 = list[0].kind;
@@ -808,6 +890,20 @@ function monthGroups(mk) {
     out.push({ last, title: it.title, kind: TYPES[it.type].label, poster: itemPoster(it, 'fill'), detail, href: '#item-' + it.id });
   }
   return out.sort((a, b) => b.last - a.last);
+}
+function sportVignette(t, list) {
+  const logo = state.logos && state.logos[t.id];
+  const lastEv = list.slice().sort((a, b) => b.ts - a.ts)[0];
+  const m = lastEv && state.matches[String(lastEv.item).slice(2)];
+  let oppId = '', oppName = '';
+  if (m) { const home = favTeamSide(m) === 'home'; oppId = String(home ? m.awayId || '' : m.homeId || ''); oppName = home ? m.away : m.home; }
+  const opp = oppId && state.logos && state.logos[oppId];
+  return `<div class="poster fill vig" style="background:radial-gradient(120% 80% at 50% 30%,${t.c1},${t.c2} 120%)" aria-hidden="true">
+    ${logo ? `<img class="main" src="${esc(logo)}" alt="">` : `<span class="vig-abbr">${esc(t.abbr)}</span>`}
+    ${m ? `<span class="vig-opp">${opp ? `<img src="${esc(opp)}" alt="">` : `<b>${esc(abbr(oppName))}</b>`}</span>` : ''}</div>`;
+}
+function fedVignette(fed) {
+  return `<div class="poster fill vig" style="background:radial-gradient(120% 80% at 50% 30%,hsl(${hashHue(fed)},45%,30%),#0A1A24 120%)" aria-hidden="true"><span class="vig-abbr" style="font-size:${fed.length <= 4 ? 34 : fed.length <= 7 ? 24 : 17}px">${esc(fed)}</span></div>`;
 }
 function viewHisto() {
   const months = activeMonths();
@@ -975,19 +1071,49 @@ function matchForm() {
     <label class="field"><span>Vu en</span><select class="input" name="mode"><option value="direct">Direct</option><option value="differe" selected>Différé</option><option value="resume">Résumé</option><option value="">Pas encore vu</option></select></label>
     <button class="btn chrome block" type="submit">Ajouter le match</button></form>`;
 }
+function posterField(cur) {
+  return `<div class="field"><span>Affiche (facultatif)</span>
+    <div class="row" style="gap:12px;align-items:center"><div class="poster sm" data-poster-preview style="background:${grad('affiche')}">${cur ? `<img src="${esc(cur)}" alt="">` : `<span class="ph">${svgIcon('upload', 18)}</span>`}</div>
+      <div class="col grow" style="gap:8px"><label class="btn" style="cursor:pointer">${svgIcon('upload', 18)}Choisir une image<input type="file" accept="image/*" data-change="poster-file" class="sr"></label>
+      <input class="input" name="posterUrl" data-keep="url" placeholder="ou colle un lien d’image" autocomplete="off" inputmode="url"></div></div>
+    <input type="hidden" name="posterData" value="${cur && cur.startsWith('data:') ? esc(cur) : ''}"></div>`;
+}
 function catchForm() {
-  const d = new Date(); const local = d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
-  const fed = ui.add.fed || 'AEW';
+  const a = ui.add; const cf = a.cf || (a.cf = {});
+  if (!a.fed || !state.feds.some((f) => f.name === a.fed)) a.fed = state.feds[0] ? state.feds[0].name : 'AEW';
+  const major = fedKind(a.fed) === 'major';
+  const kind = major ? (a.ckind === 'ppv' ? 'ppv' : 'hebdo') : 'show';
+  const plan = !!a.cplan;
+  const d = new Date(); const today = d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
   return `<form class="col" style="gap:14px" data-form="catch-add">
-    <div class="field"><span>Fédération</span><div class="chips">${FEDS.map((f) => `<button type="button" class="chip ${fed === f ? 'on' : ''}" data-a="catch-fed" data-v="${f}">${f}</button>`).join('')}</div></div>
-    ${fed === 'Autre' ? `<label class="field"><span>Nom de la fédération</span><input class="input" name="fedname" required></label>` : ''}
-    <label class="field"><span>Show ou événement</span><input class="input" name="show" placeholder="Ex. Collision, Full Gear, gala APC…"></label>
-    <div class="field"><span>Type</span><div class="seg"><button type="button" class="${ui.add.ckind !== 'event' ? 'on' : ''}" data-a="catch-kind" data-v="hebdo">Show (+${XP.catchHebdo} XP)</button><button type="button" class="${ui.add.ckind === 'event' ? 'on' : ''}" data-a="catch-kind" data-v="event">Événement (+${XP.catchEvent} XP)</button></div></div>
-    <label class="field"><span>Vu en</span><select class="input" name="mode"><option value="direct">Direct</option><option value="differe" selected>Différé</option><option value="resume">Résumé (+${XP.catchResume} XP)</option></select></label>
-    <label class="field"><span>Date</span><input class="input" name="date" type="date" value="${local}" required></label>
-    <label class="field"><span>Un mot (facultatif)</span><input class="input" name="note" placeholder="Ex. main event incroyable"></label>
-    <button class="btn chrome block" type="submit">Noter dans le journal</button>
-    <span class="small muted">Pour AEW Dynamite, utilise plutôt sa fiche dans Biblio › Catch : chaque épisode s’y coche comme une série.</span></form>`;
+    <div class="seg"><button type="button" class="${plan ? '' : 'on'}" data-a="catch-plan" data-v="0">Déjà vu</button><button type="button" class="${plan ? 'on' : ''}" data-a="catch-plan" data-v="1">À venir</button></div>
+    <div class="field"><span>Fédération</span><div class="chips">${state.feds.map((f) => `<button type="button" class="chip ${a.fed === f.name ? 'on' : ''}" data-a="catch-fed" data-v="${esc(f.name)}">${esc(f.name)}</button>`).join('')}<button type="button" class="chip" data-a="feds-open">+ Fédération</button></div></div>
+    <div class="field"><span>Type</span>${major
+      ? `<div class="seg"><button type="button" class="${kind === 'hebdo' ? 'on' : ''}" data-a="catch-kind" data-v="hebdo">Hebdo (+${XP.catchHebdo} XP)</button><button type="button" class="${kind === 'ppv' ? 'on' : ''}" data-a="catch-kind" data-v="ppv">PPV (+${XP.catchPPV} XP)</button></div>`
+      : `<div class="pill" style="align-self:flex-start">Show (+${XP.catchShow} XP)</div>`}</div>
+    <label class="field"><span>Nom</span><input class="input" name="show" data-keep="show" value="${esc(cf.show || '')}" placeholder="${major ? 'Ex. Collision, Full Gear…' : 'Ex. Anarchie, Doomsday…'}" ${plan ? 'required' : ''} autocomplete="off"></label>
+    <div class="grid2"><label class="field"><span>Date</span><input class="input" name="date" data-keep="date" type="date" value="${esc(cf.date || today)}" required></label>
+      <label class="field"><span>Heure</span><input class="input" name="time" data-keep="time" type="time" value="${esc(cf.time || (major ? '02:00' : '19:00'))}"></label></div>
+    ${plan ? '' : `<label class="field"><span>Vu en</span><select class="input" name="mode" data-keep="mode">${Object.keys(MODES).map((k) => `<option value="${k}" ${(cf.mode || 'differe') === k ? 'selected' : ''}>${MODES[k]}${k === 'resume' ? ` (+${XP.catchResume} XP)` : ''}</option>`).join('')}</select></label>`}
+    ${posterField(a.cposter)}
+    ${plan ? '' : `<label class="field"><span>Un mot (facultatif)</span><input class="input" name="note" data-keep="note" value="${esc(cf.note || '')}" placeholder="Ex. main event incroyable"></label>`}
+    <button class="btn chrome block" type="submit">${plan ? 'Programmer le show' : 'Noter dans le journal'}</button>
+    <span class="small muted">${plan ? 'Le jour J, le show apparaît dans En cours. Une fois passé, Rewind te demande si tu l’as vu.' : 'Pour AEW Dynamite, utilise plutôt sa fiche dans Biblio › Catch : chaque épisode s’y coche comme une série.'}</span></form>`;
+}
+function fedsModal() {
+  openModal('Fédérations', `<div class="col" style="gap:10px">${state.feds.map((f, i) => `<div class="card-row" style="padding:8px 10px"><b class="grow">${esc(f.name)}</b>
+      <div class="seg" style="width:auto"><button class="${f.kind === 'major' ? 'on' : ''}" data-a="fed-kind" data-i="${i}" data-v="major">Major</button><button class="${f.kind === 'inde' ? 'on' : ''}" data-a="fed-kind" data-i="${i}" data-v="inde">Indé</button></div>
+      <button class="icon-btn dark" data-a="fed-del" data-i="${i}" aria-label="Retirer ${esc(f.name)}">${svgIcon('trash', 16)}</button></div>`).join('')}
+    <span class="small muted">Major : Hebdo et PPV. Indé : Show.</span>
+    <form class="row" style="gap:8px" data-form="fed-add"><input class="input grow" name="name" placeholder="Ex. GCW" required autocomplete="off"><select class="input" name="kind" style="width:auto"><option value="inde">Indé</option><option value="major">Major</option></select><button class="btn chrome" type="submit">Ajouter</button></form>
+    <button class="btn block" data-a="modal-close">Fermer</button></div>`);
+}
+function showModal(s) {
+  const past = s.ts < now();
+  openModal(s.name, `<div class="col" style="gap:12px">${s.poster ? `<img src="${esc(s.poster)}" alt="Affiche de ${esc(s.name)}" style="width:100%;border-radius:12px;max-height:60vh;object-fit:contain;background:#000">` : ''}
+    <span class="label cyan">${esc(s.fed)} · ${esc(CKINDS[s.kind] || 'Show')} · ${esc(fmtMatch(s.ts))}</span>
+    ${past && !s.seen ? `<div class="seg">${Object.keys(MODES).map((k) => `<button data-a="show-seen" data-id="${s.id}" data-mode="${k}">${MODES[k]}</button>`).join('')}</div>` : ''}
+    <div class="grid2"><button class="btn danger" data-a="show-del" data-id="${s.id}">${svgIcon('trash', 16)}Supprimer</button><button class="btn" data-a="modal-close">Fermer</button></div></div>`);
 }
 
 /* ---------- Fiche œuvre ---------- */
@@ -1242,6 +1368,7 @@ const ACT = {
       ${sh === 'episodes' && !(it.src && it.src.api === 'tmdb') ? `<label class="field"><span>Épisodes par saison</span><input class="input" name="seasons" value="${esc(it.seasons.map((s) => s.count).join(', '))}"></label>` : ''}
       ${sh === 'tomes' || sh === 'livre' ? `<label class="field"><span>Nombre de tomes</span><input class="input" name="tomes" type="number" min="1" max="300" value="${it.volumes.length}"></label>` : ''}
       ${sh === 'livre' ? `<label class="field"><span>Pages par tome</span><input class="input" name="pages" type="number" min="0" value="${esc(it.volumes[0] ? it.volumes[0].pages || '' : '')}"></label>` : ''}
+      ${posterField(it.poster)}
       ${sh === 'episodes' || sh === 'tomes' || sh === 'livre' ? `<label class="toggle"><input type="checkbox" name="ended" ${it.ended ? 'checked' : ''}><span class="sw"></span><span class="grow"><b style="font-size:14px">Terminée (plus de suite prévue)</b></span></label>` : ''}
       <div class="grid2"><button class="btn" type="button" data-a="modal-close">Annuler</button><button class="btn chrome" type="submit">Enregistrer</button></div></form>`);
   },
@@ -1259,6 +1386,14 @@ const ACT = {
   'catch-del'(d) { confirmBox('Supprimer cette entrée ?', 'L’entrée et son XP seront retirées du journal.', 'Supprimer', () => { catchRemove(d.id); checkUnlocks(true); save(); closeModal(); }, true); },
   'catch-fed'(d) { ui.add.fed = d.v; render(); },
   'catch-kind'(d) { ui.add.ckind = d.v; render(); },
+  'catch-plan'(d) { ui.add.cplan = d.v === '1'; render(); },
+  'feds-open'() { fedsModal(); },
+  'fed-kind'(d) { state.feds[+d.i].kind = d.v; save(); fedsModal(); },
+  'fed-del'(d) { if (state.feds.length <= 1) return; state.feds.splice(+d.i, 1); save(); fedsModal(); },
+  'show-open'(d) { const s0 = state.shows[d.id]; if (s0) showModal(s0); },
+  'show-seen'(d) { const s0 = state.shows[d.id]; ui.modal = null; withXp(() => showSee(s0, d.mode)); },
+  'show-dismiss'(d) { state.shows[d.id].dismissed = true; save(); render(); },
+  'show-del'(d) { confirmBox('Supprimer ce show ?', 'Il sera retiré des shows programmés.', 'Supprimer', () => { delete state.shows[d.id]; save(); closeModal(); }, true); },
   'catch-new-show'() {
     openModal('Nouveau show suivi', `<form class="col" style="gap:12px" data-form="catch-show"><label class="field"><span>Nom du show</span><input class="input" name="title" placeholder="Ex. AEW Collision" required></label><div class="grid2"><button class="btn" type="button" data-a="modal-close">Annuler</button><button class="btn chrome" type="submit">Ajouter</button></div></form>`);
   },
@@ -1345,10 +1480,24 @@ const FORMS = {
     location.hash = '#match-' + id;
   },
   'catch-add'(fd) {
-    const fed = ui.add.fed === 'Autre' ? String(fd.get('fedname') || 'Autre').trim() : (ui.add.fed || 'AEW');
-    const ts = Date.parse(fd.get('date') + 'T20:00:00') || now();
-    withXp(() => catchAdd({ fed, show: String(fd.get('show') || '').trim(), kind: ui.add.ckind === 'event' ? 'event' : 'hebdo', mode: fd.get('mode'), note: String(fd.get('note') || '').trim(), ts }));
+    const a = ui.add; const fed = a.fed || 'AEW';
+    const kind = fedKind(fed) === 'major' ? (a.ckind === 'ppv' ? 'ppv' : 'hebdo') : 'show';
+    const ts = Date.parse(fd.get('date') + 'T' + (fd.get('time') || '20:00') + ':00') || now();
+    const poster = String(fd.get('posterData') || '').trim() || String(fd.get('posterUrl') || '').trim();
+    const name = String(fd.get('show') || '').trim();
+    if (a.cplan) {
+      const id = uid(); state.shows[id] = { id, fed, name, kind, ts, poster, seen: null, dismissed: false, createdAt: now() };
+      save(); toast(esc(name) + ' programmé', '', 2200);
+    } else {
+      withXp(() => catchAdd({ fed, show: name, kind, mode: fd.get('mode'), note: String(fd.get('note') || '').trim(), ts, poster }));
+    }
+    a.cf = {}; a.cposter = ''; a.cplan = false;
     ui.biblio.type = 'catch'; location.hash = '#biblio';
+  },
+  'fed-add'(fd) {
+    const name = String(fd.get('name') || '').trim(); if (!name) return;
+    if (!state.feds.some((f) => f.name.toLowerCase() === name.toLowerCase())) state.feds.push({ name, kind: fd.get('kind') === 'major' ? 'major' : 'inde' });
+    ui.add.fed = name; save(); fedsModal();
   },
   'catch-show'(fd) {
     createItem({ type: 'catch', title: String(fd.get('title')).trim(), status: 'encours', ended: false, src: { api: 'manuel' }, seasons: [{ n: 1, name: 'Épisodes', count: 0, eps: [] }] });
@@ -1365,6 +1514,8 @@ const FORMS = {
   'item-edit'(fd, form) {
     const it = state.items[form.dataset.id]; const sh = shape(it);
     it.title = String(fd.get('title')).trim() || it.title;
+    const poster = String(fd.get('posterData') || '').trim() || String(fd.get('posterUrl') || '').trim();
+    if (poster) it.poster = poster;
     if (fd.has('seasons')) { const c = String(fd.get('seasons')).split(/[,;\s]+/).map(Number).filter((n) => n > 0); if (c.length) it.seasons = c.map((n, i) => Object.assign(it.seasons[i] || { n: i + 1, name: 'Saison ' + (i + 1), eps: null }, { count: n })); }
     if (fd.has('tomes')) { const n = clamp(+fd.get('tomes') || 1, 1, 300); const pages = fd.has('pages') ? +fd.get('pages') || 0 : 0; it.volumes = Array.from({ length: n }, (_, i) => Object.assign({ n: i + 1, pages }, it.volumes[i] || {}, sh === 'livre' && fd.has('pages') ? { pages } : {})); }
     if (sh === 'episodes' || sh === 'tomes' || sh === 'livre') it.ended = !!fd.get('ended');
@@ -1440,16 +1591,30 @@ document.addEventListener('change', (e) => {
   const el = e.target; const a = el.dataset.change; if (!a) return;
   if (a === 'catchup') { const it = state.items[el.dataset.id]; it.catchup = el.checked; save(); render(); toast(el.checked ? 'Rattrapage activé : sans XP' : 'Rattrapage terminé : l’XP compte à nouveau', '', 2400); }
   if (a === 'add-catchup') { ui.add.catchup = el.checked; }
+  if (a === 'poster-file') {
+    const file = el.files && el.files[0]; if (!file) return;
+    const form = el.closest('form');
+    imageToDataUrl(file).then((data) => {
+      if (form && form.elements.posterData) form.elements.posterData.value = data;
+      const pv = form && form.querySelector('[data-poster-preview]'); if (pv) pv.innerHTML = `<img src="${data}" alt="">`;
+      if (form && form.dataset.form === 'catch-add') ui.add.cposter = data;
+    }).catch(() => toast('Image illisible.', '', 2600));
+    el.value = '';
+  }
   if (a === 'import') {
     const file = el.files && el.files[0]; if (!file) return;
     file.text().then((txt) => {
       let data; try { data = JSON.parse(txt); } catch (err) { toast('Fichier illisible.', '', 3000); return; }
+      if (data && data.rewindPack) { const n = importPack(data); toast(n ? plural(n, 'show') + ' ajouté' + (n > 1 ? 's' : '') : 'Rien de nouveau dans ce fichier', n ? 'gold' : '', 2600); return; }
       if (!data || !data.items || !data.events) { toast('Ce fichier n’est pas une sauvegarde Rewind.', '', 3000); return; }
       confirmBox('Importer cette sauvegarde ?', `Elle contient ${plural(Object.keys(data.items).length, 'œuvre')} et ${plural(data.events.length, 'événement')}. Tes données actuelles seront remplacées.`, 'Importer', () => { state = migrate(data); checkUnlocks(true); save(); toast('Sauvegarde importée', 'gold'); location.hash = '#encours'; render(); });
     });
     el.value = '';
   }
 });
+// garde la saisie du formulaire catch quand on change d'onglet de type
+document.addEventListener('input', (e) => { const k = e.target.dataset && e.target.dataset.keep; if (k && e.target.closest('form[data-form="catch-add"]')) { ui.add.cf = ui.add.cf || {}; ui.add.cf[k] = e.target.value; } });
+document.addEventListener('change', (e) => { const k = e.target.dataset && e.target.dataset.keep; if (k && e.target.closest('form[data-form="catch-add"]')) { ui.add.cf = ui.add.cf || {}; ui.add.cf[k] = e.target.value; } });
 // filtre local de la bibliothèque (sans re-rendu)
 document.addEventListener('input', (e) => {
   if (e.target.dataset.filter !== 'bib') return;
@@ -1511,7 +1676,8 @@ function loadDemo() {
   state.matches.demoM = { id: 'demoM', ext: false, team: 'milan', sport: 'foot', league: 'Serie A', home: 'AC Milan', away: 'Juventus', homeId: TEAMS.milan.id, ts: d(9), hs: 2, as: 1, seen: null, dismissed: false };
   matchSee(state.matches.demoM, 'differe');
   state.events.forEach((e) => { if (e.kind === 'match') e.ts = state.matches[e.item.slice(2)].ts + 3 * 3600000; });
-  catchAdd({ fed: 'APC', show: 'Gala APC', kind: 'event', mode: 'direct', note: 'Exemple', ts: d(16) });
+  catchAdd({ fed: 'APC', show: 'Gala APC', kind: 'show', mode: 'direct', note: 'Exemple', ts: d(16) });
+  state.shows.demoS = { id: 'demoS', fed: 'KHAO', name: 'Show KHAO (démo)', kind: 'show', ts: now() + 5 * DAY, poster: '', seen: null, dismissed: false, createdAt: now() };
   catchAdd({ fed: 'Stardom', show: 'Stardom World', kind: 'hebdo', mode: 'differe', note: '', ts: d(5) });
   state.settings.catchTrialStart = d(9);
   checkUnlocks(true); save(); location.hash = '#encours'; render();

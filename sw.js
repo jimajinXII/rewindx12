@@ -1,8 +1,8 @@
 /* Rewind – service worker : appli disponible hors connexion + cache des images */
-const VERSION = 'rewind-v1.1.0';
+const VERSION = 'rewind-v1.2.0';
 const SHELL = ['./', './index.html', './styles.css', './app.js', './manifest.webmanifest',
   './icons/icon.svg', './icons/icon-192.png', './icons/icon-512.png', './icons/icon-maskable-512.png'];
-const IMG_HOSTS = ['image.tmdb.org', 's4.anilist.co', 'img.anili.st', 'covers.openlibrary.org', 'media.rawg.io',
+const IMG_HOSTS = ['image.tmdb.org', 's4.anilist.co', 'img.anili.st', 'covers.openlibrary.org', 'media.rawg.io', 'books.google.com', 'books.googleusercontent.com',
   'www.thesportsdb.com', 'r2.thesportsdb.com', 'fonts.googleapis.com', 'fonts.gstatic.com'];
 
 self.addEventListener('install', (e) => {
