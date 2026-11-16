@@ -3,7 +3,7 @@
    sauf les recherches de titres vers TMDB, AniList, Open Library, RAWG et TheSportsDB. */
 'use strict';
 
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.4.0';
 const DAY = 86400000;
 
 /* =========================================================
@@ -464,7 +464,7 @@ async function anilist(query, variables) {
   if (r.errors) throw new Error(r.errors[0].message);
   return r.data;
 }
-const AL_FIELDS = 'id title{romaji english} coverImage{large} bannerImage episodes volumes chapters duration status format startDate{year}';
+const AL_FIELDS = 'id title{romaji english native} coverImage{large} bannerImage episodes volumes chapters duration status format startDate{year}';
 async function search(type, q) {
   if (type === 'film' || type === 'serie' || type === 'doc') {
     const path = type === 'film' ? '/search/movie' : type === 'serie' ? '/search/tv' : '/search/multi';
@@ -480,7 +480,7 @@ async function search(type, q) {
   }
   if (type === 'anime' || type === 'manga') {
     const d = await anilist(`query($s:String,$t:MediaType){Page(perPage:15){media(search:$s,type:$t,sort:SEARCH_MATCH){${AL_FIELDS}}}}`, { s: q, t: type === 'anime' ? 'ANIME' : 'MANGA' });
-    return d.Page.media.map((m) => ({ src: { api: 'anilist', id: m.id }, title: m.title.english || m.title.romaji, year: (m.startDate && m.startDate.year) || '',
+    return d.Page.media.map((m) => ({ src: { api: 'anilist', id: m.id }, title: m.title.english || m.title.romaji, alt: [m.title.english, m.title.romaji, m.title.native].filter(Boolean), year: (m.startDate && m.startDate.year) || '',
       poster: (m.coverImage && m.coverImage.large) || '', backdrop: m.bannerImage || '', episodes: m.episodes, volumes: m.volumes, duration: m.duration,
       ended: m.status === 'FINISHED', sub: type === 'anime' ? (m.episodes ? m.episodes + ' ép.' : 'En cours de diffusion') : (m.volumes ? m.volumes + ' tomes' : m.status === 'FINISHED' ? 'Terminé' : 'En cours de parution') }));
   }
@@ -524,7 +524,18 @@ async function buildFromResult(type, r, opt) {
     base.overview = d.overview || base.overview; base.syncedAt = now();
     return base;
   }
+  if (r.src.api === 'anilist' && type === 'anime' && (state.settings.tmdbKey || '').trim()) {
+    try {
+      const c = await tmdbAnimeCandidates(r.alt && r.alt.length ? r.alt : [r.title], r.year);
+      if (c[0] && c[0].score >= 8) {
+        const { d, seasons } = await tmdbTvSeasons(c[0].x.id);
+        return Object.assign(base, { seasons, src: { api: 'tmdb', id: c[0].x.id, kind: 'tv', al: r.src.id }, ended: d.status === 'Ended' || d.status === 'Canceled',
+          runtime: (d.episode_run_time && d.episode_run_time[0]) || r.duration || 0, overview: d.overview || base.overview, backdrop: d.backdrop_path ? IMG.backdrop + d.backdrop_path : base.backdrop, syncedAt: now(), tmdbTried: true });
+      }
+    } catch (e) { /* repli AniList */ }
+  }
   if (r.src.api === 'anilist' && type === 'anime') {
+    base.altTitles = r.alt || [];
     let count = r.episodes || 0; let eps = null;
     try {
       const d = await anilist(`query($id:Int){Media(id:$id){episodes status duration nextAiringEpisode{episode} streamingEpisodes{title thumbnail}}}`, { id: r.src.id });
@@ -565,6 +576,64 @@ async function loadSeason(item, n) {
     if (s.eps.length > s.count) s.count = s.eps.length;
     save(); render();
   } catch (e) { seasonLoading[k] = 'fail'; }
+}
+/* Anime : AniList pour trouver, TMDB pour les épisodes (titres français, miniatures, saisons) */
+const normT = (t) => String(t || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9\u3040-\u30ff\u4e00-\u9fff]+/g, ' ').trim();
+async function tmdbAnimeCandidates(titles, year) {
+  const out = new Map();
+  for (const t of titles.slice(0, 3)) {
+    try {
+      const r = await tmdb('/search/tv', { query: t });
+      (r.results || []).forEach((x) => { if (!out.has(x.id)) out.set(x.id, x); });
+    } catch (e) { if (String(e.message).startsWith('NOKEY')) throw e; }
+    if (out.size >= 8) break;
+  }
+  const names = titles.map(normT);
+  return [...out.values()].map((x) => {
+    const y = +(x.first_air_date || '').slice(0, 4);
+    let score = 0;
+    if ((x.genre_ids || []).includes(16)) score += 3;
+    if ((x.origin_country || []).includes('JP') || x.original_language === 'ja') score += 2;
+    if (names.includes(normT(x.name)) || names.includes(normT(x.original_name))) score += 4;
+    if (year && y) score += y === +year ? 3 : Math.abs(y - year) <= 1 ? 1 : -2;
+    return { x, score };
+  }).sort((a, b) => b.score - a.score);
+}
+async function tmdbTvSeasons(id) {
+  const d = await tmdb('/tv/' + id);
+  let seasons = (d.seasons || []).filter((s) => s.season_number > 0 && s.episode_count > 0).map((s) => ({ n: s.season_number, name: s.name, count: s.episode_count, eps: null }));
+  if (!seasons.length) seasons = [{ n: 1, name: 'Saison 1', count: d.number_of_episodes || 0, eps: null }];
+  return { d, seasons };
+}
+// remplace l'épisodage AniList (une seule liste) par les saisons TMDB, sans perdre ce qui est coché
+async function linkAnimeTmdb(it, tvId) {
+  const { d, seasons } = await tmdbTvSeasons(tvId);
+  const total = seasons.reduce((a, x) => a + x.count, 0);
+  const map = (abs) => { let left = abs; for (const x of seasons) { if (left <= x.count) return 's' + x.n + 'e' + left; left -= x.count; } const last = seasons[seasons.length - 1]; return 's' + last.n + 'e' + (last.count + left); };
+  const re = /^s1e(\d+)$/;
+  it.passes.forEach((ps) => { const nd = {}; Object.keys(ps.done).forEach((k) => { const m = re.exec(k); nd[m ? map(+m[1]) : k] = ps.done[k]; }); ps.done = nd; });
+  state.events.forEach((e) => { if (e.item === it.id) { const m = re.exec(e.key || ''); if (m) e.key = map(+m[1]); } });
+  const old = it.seasons.reduce((a, x) => a + x.count, 0);
+  if (old > total) seasons[seasons.length - 1].count += old - total;
+  it.seasons = seasons;
+  it.src = { api: 'tmdb', id: tvId, kind: 'tv', al: it.src && it.src.api === 'anilist' ? it.src.id : (it.src && it.src.al) };
+  it.ended = d.status === 'Ended' || d.status === 'Canceled';
+  if (d.overview) it.overview = d.overview;
+  if (!it.backdrop && d.backdrop_path) it.backdrop = IMG.backdrop + d.backdrop_path;
+  it.runtime = it.runtime || (d.episode_run_time && d.episode_run_time[0]) || 0;
+  it.syncedAt = now(); it.tmdbTried = true;
+  delete ui.season[it.id];
+  // badges de saisons déjà terminées avant le lien : sans XP
+  const cu = it.catchup; it.catchup = true; checkBonuses(it); it.catchup = cu;
+  Object.keys(seasonLoading).forEach((k) => { if (k.startsWith(it.id + ':')) delete seasonLoading[k]; });
+}
+async function autoLinkAnime(it) {
+  if (it.type !== 'anime' || !it.src || it.src.api !== 'anilist' || it.tmdbTried || !(state.settings.tmdbKey || '').trim()) return;
+  it.tmdbTried = true; save();
+  try {
+    const c = await tmdbAnimeCandidates([it.title].concat(it.altTitles || []), it.year);
+    if (c[0] && c[0].score >= 8) { await linkAnimeTmdb(it, c[0].x.id); save(); render(); toast('Titres et miniatures récupérés sur TMDB', 'gold', 2400); }
+  } catch (e) { /* on proposera le bouton */ }
 }
 async function refreshTv(item) {
   const d = await tmdb('/tv/' + item.src.id);
@@ -1172,6 +1241,7 @@ function viewItem(id) {
   if (!it) return `<main class="view"><div class="empty">Cette œuvre n’existe plus.<br><a href="#biblio">Retour à la bibliothèque</a></div></main>`;
   const sh = shape(it); const p = progress(it); const pass = curPass(it);
   const bg = it.backdrop || it.poster;
+  if (it.type === 'anime' && it.src && it.src.api === 'anilist' && !it.tmdbTried) setTimeout(() => autoLinkAnime(it), 0);
   let h = `<section class="detail-hero" aria-label="${esc(it.title)}"><div class="bg" style="background:${grad(it.title)}">${bg ? `<img src="${esc(bg)}" alt="" loading="lazy">` : ''}</div>
     <button class="icon-btn dark back" data-a="back" aria-label="Retour">${svgIcon('back', 20)}</button>
     <button class="icon-btn dark menu" data-a="item-menu" data-id="${it.id}" aria-label="Options">${svgIcon('dots', 22)}</button>
@@ -1204,6 +1274,9 @@ function episodesBlock(it) {
   ui.season[it.id] = sn;
   const s = it.seasons.find((x) => x.n === sn);
   let h = '';
+  if (it.type === 'anime' && it.src && it.src.api === 'anilist' && it.tmdbTried && (state.settings.tmdbKey || '').trim()) {
+    h += `<div class="banner info">${svgIcon('tv', 18)}<span class="grow">Titres et miniatures des épisodes disponibles via TMDB.</span><button class="link" data-a="anime-link" data-id="${it.id}">Choisir</button></div>`;
+  }
   if (it.seasons.length > 1) {
     h += `<div class="dropdown ${ui.ddOpen ? 'open' : ''}"><button data-a="dd" aria-haspopup="listbox" aria-expanded="${ui.ddOpen}"><span class="dd-title">${esc(s.name && !/^Saison \d+$/.test(s.name) ? s.name : 'Saison ' + s.n)}</span><span class="label">${it.seasons.length > 1 ? epCountDone(it, s) + ' / ' + s.count : ''}</span><span class="chev">${svgIcon('chevD', 18)}</span></button>
       ${ui.ddOpen ? `<div class="dd-list" role="listbox" aria-label="Choisir une saison">${it.seasons.map((x) => `<button role="option" aria-selected="${x.n === sn}" class="${x.n === sn ? 'on' : ''}" data-a="pick-season" data-id="${it.id}" data-v="${x.n}"><span class="grow">Saison ${x.n}</span>${seasonDone(it, x) ? `<span style="color:var(--amber)">${svgIcon('star', 14, true)}</span>` : ''}<span class="label">${epCountDone(it, x)} / ${x.count}</span></button>`).join('')}</div>` : ''}</div>`;
@@ -1436,6 +1509,19 @@ const ACT = {
   'catch-del'(d) { confirmBox('Supprimer cette entrée ?', 'L’entrée et son XP seront retirées du journal.', 'Supprimer', () => { catchRemove(d.id); checkUnlocks(true); save(); closeModal(); }, true); },
   'catch-fed'(d) { ui.add.fed = d.v; ui.add.cpick = null; render(); if (CATCH_LEAGUES[d.v]) syncCatch(d.v); },
   'catch-kind'(d) { ui.add.ckind = d.v; render(); },
+  async 'anime-link'(d) {
+    const it = state.items[d.id]; toast('Recherche sur TMDB…', '', 1200);
+    try {
+      const c = (await tmdbAnimeCandidates([it.title].concat(it.altTitles || []), it.year)).slice(0, 6);
+      if (!c.length) { toast('Aucun résultat sur TMDB.', '', 2600); return; }
+      openModal('Quelle série sur TMDB ?', `<div class="col" style="gap:8px">${c.map(({ x }) => `<button class="result" data-a="anime-link-pick" data-id="${it.id}" data-tv="${x.id}">${posterHtml(x.name, x.poster_path ? IMG.poster + x.poster_path : '', 'sm')}<div class="col grow" style="gap:3px;text-align:left"><span style="font-weight:700">${esc(x.name)}</span><span class="small muted">${esc((x.first_air_date || '').slice(0, 4))}${x.original_name && x.original_name !== x.name ? ' · ' + esc(x.original_name) : ''}</span></div></button>`).join('')}
+        <span class="small muted">Ta progression est conservée : les épisodes cochés sont répartis dans les saisons TMDB.</span><button class="btn block" data-a="modal-close">Annuler</button></div>`);
+    } catch (e) { toast(esc(errText(e)), '', 3000); }
+  },
+  async 'anime-link-pick'(d) {
+    const it = state.items[d.id]; closeModal();
+    try { await linkAnimeTmdb(it, +d.tv); touched(it); save(); render(); toast('Épisodes mis à jour', 'gold', 2200); } catch (e) { toast(esc(errText(e)), '', 3000); }
+  },
   'catch-plan'(d) { ui.add.cplan = d.v === '1'; render(); },
   'catch-feed-sync'(d) { toast('Recherche des shows ' + esc(d.v) + '…', '', 1400); syncCatch(d.v, true).then((n) => { if (!n) toast('TheSportsDB n’a rien renvoyé pour le moment.', '', 2800); render(); }); render(); },
   'catch-pick'(d) {
