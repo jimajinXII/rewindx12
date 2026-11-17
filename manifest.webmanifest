@@ -1,14 +1,14 @@
 {
   "name": "Rewind",
   "short_name": "Rewind",
-  "description": "Ton suivi culturel : films, séries, anime, livres, BD, manga, jeux, sport et catch.",
+  "description": "Ton suivi culturel : films, séries, docs, livres, BD, manga, jeux, sport et catch.",
   "lang": "fr",
   "start_url": "./#encours",
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#06141C",
-  "theme_color": "#06141C",
+  "background_color": "#0A0D11",
+  "theme_color": "#0A0D11",
   "icons": [
     { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
     { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },

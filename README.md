@@ -29,7 +29,7 @@ Le code est public, mais il ne contient rien de personnel : ni tes données, ni 
 4. Dans Rewind : **Profil › Réglages**, colle-la, puis touche **Tester TMDB**.
 
 Facultatif : une clé **RAWG** (https://rawg.io/apidocs) pour chercher les jeux vidéo.
-Sans elle, tu peux ajouter tes jeux à la main. AniList (anime, manga), Open Library (livres)
+Sans elle, tu peux ajouter tes jeux à la main. AniList (manga), Google Books et Open Library (livres)
 et TheSportsDB (Sixers et AC Milan) ne demandent pas de clé.
 
 ## 4. Sauvegarder
