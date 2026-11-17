@@ -3,7 +3,7 @@
    sauf les recherches de titres vers TMDB, AniList, Open Library, RAWG et TheSportsDB. */
 'use strict';
 
-const APP_VERSION = '1.5.0';
+const APP_VERSION = '2.1.0';
 const ANIME_TMDB = true; // anime : épisodes via TMDB quand la clé est là
 const DAY = 86400000;
 
@@ -794,14 +794,33 @@ const TABS = [
 function navHtml(active) {
   return `<nav class="nav" aria-label="Navigation principale">${TABS.map((t) => `<a href="#${t.r}" class="${t.r === active ? 'on' : ''}" ${t.r === active ? 'aria-current="page"' : ''}>${svgIcon(t.icon, 20)}${t.label}</a>`).join('')}</nav>`;
 }
-function fab(href) { return `<a class="fab" href="${href || '#ajouter'}" aria-label="Ajouter">${svgIcon('plus', 26)}</a>`; }
+function fab(href) { return href ? `<a class="fab" href="${href}" aria-label="Ajouter">${svgIcon('plus', 26)}</a>` : `<button class="fab" data-a="add-menu" aria-label="Ajouter">${svgIcon('plus', 26)}</button>`; }
+const CROWN = '<svg width="20" height="15" viewBox="0 0 18 14" aria-hidden="true"><path d="M1 3.5l4 3.5 4-6 4 6 4-3.5-1.6 9H2.6z" fill="currentColor"/></svg>';
+const ADD_MENU = [['film', 'film', 'Film', 'TMDB'], ['serie', 'tv', 'Série', 'Saisons'], ['anime', 'play', 'Anime', 'Épisodes'], ['doc', 'tv', 'Docu', 'TMDB'], ['livre', 'book', 'Livre', 'Google Books'], ['manga', 'layers', 'Manga', 'Tomes'], ['bd', 'layers', 'BD', 'Tomes'], ['jeu', 'game', 'Jeu vidéo', 'RAWG'], ['sport', 'ball', 'Match', 'Sixers, Milan'], ['catch', 'belt', 'Catch', 'Show, PPV']];
+function secHead(title, href, link) { return `<div class="sec-head"><h2 class="h2">${title}</h2>${href ? `<a href="${href}">${link || 'Voir tout'}${svgIcon('chevR', 15)}</a>` : ''}</div>`; }
+function mcard(it, opts) {
+  opts = opts || {};
+  const p = pct(it); const done = it.status === 'termine';
+  const img = it.backdrop || it.poster;
+  const meta = opts.meta || (it.status === 'envie' ? TYPES[it.type].label + (it.year ? ' · ' + it.year : '') : (opts.short ? shortProgress(it) : TYPES[it.type].label + ' · ' + progressText(it)));
+  const showBar = it.status === 'encours' || (opts.short && !done);
+  return `<div class="mcard" data-title="${esc(it.title.toLowerCase())}"><a class="im" href="#item-${it.id}">${posterHtml(it.title, img, '')}<span class="tt it">${esc(it.title)}</span></a>
+    <div class="bd"><span class="meta">${done ? svgIcon('check', 15) : ''}${esc(meta)}</span>${showBar ? bar(p, 'cy thin') : ''}${opts.extra || ''}</div></div>`;
+}
+function shortProgress(it) {
+  const sh = shape(it); const nx = nextUnit(it);
+  if (sh === 'episodes' && nx) return (it.seasons.length > 1 ? 'S' + nx.s + ' · ' : '') + 'Ép. ' + nx.e;
+  if (sh === 'tomes' && nx) return 'Tome ' + nx.n;
+  if (sh === 'livre') return 'Lecture · ' + pct(it) + ' %';
+  return progressText(it);
+}
 
 /* =========================================================
    9. Vues
    ========================================================= */
 function levelChip() {
   const L = levelInfo();
-  return `<a class="lvl" href="#profil" aria-label="Niveau ${L.lvl}, ${L.into} XP sur ${L.need}"><span class="label">NIV. ${L.lvl} · ${fmtNum(L.into)} XP</span>${bar(L.pct, 'thin')}</a>`;
+  return `<a class="lvl" href="#profil" aria-label="Niveau ${L.lvl}, ${L.into} XP sur ${L.need}"><span class="label">${CROWN}NIV. ${L.lvl} · ${fmtNum(L.xp)} XP</span>${bar(L.pct)}</a>`;
 }
 function demoBanner() {
   return state.demo ? `<div class="banner warn">${svgIcon('eye', 18)}<span class="grow">Données de démonstration.</span><button class="link" data-a="clear-demo">Effacer</button></div>` : '';
@@ -812,55 +831,51 @@ function viewEncours() {
   const items = Object.values(state.items).filter((i) => i.status === 'encours' && (i.type !== 'catch' || nextUnit(i))).sort((a, b) => b.updatedAt - a.updatedAt);
   const userItems = Object.values(state.items).filter((i) => !(i.type === 'catch' && !progress(i).total));
   const pend = pendingMatches().slice(0, 3);
-  const mk = monthKey(now()); const goals = goalResults(mk);
+  const pshows = showsPending().slice(0, 3);
+  const upcoming = showsUpcoming().filter((s) => s.ts < now() + 45 * DAY).slice(0, 4);
   let h = `<div class="head"><h1 class="h1">En cours</h1>${levelChip()}</div>${demoBanner()}`;
   if (!userItems.length && !Object.keys(state.matches).length && !state.catchLog.length && !Object.keys(state.shows).length) {
     h += `<section class="glass pad col" aria-label="Bienvenue"><span class="label cyan">Bienvenue sur Rewind</span>
       <p style="margin:0;line-height:1.5">Pour bien démarrer :</p>
-      <ol style="margin:0;padding-left:20px;line-height:1.7;color:#CFE3EA">
+      <ol style="margin:0;padding-left:20px;line-height:1.7;color:var(--soft)">
         <li>Ajoute ta clé TMDB dans <a href="#profil">Profil</a> pour les affiches et les épisodes.</li>
         <li>Ajoute ce que tu suis déjà. Le mode <b>rattrapage</b> coche l’existant sans XP.</li>
         <li>Coche au fur et à mesure : l’XP, les badges et l’historique suivent.</li>
       </ol>
-      <a class="btn chrome block" href="#ajouter">${svgIcon('plus', 18)}Ajouter une œuvre</a>
+      <button class="btn prim block" data-a="add-menu">${svgIcon('plus', 18)}Ajouter une œuvre</button>
       <button class="btn block" data-a="load-demo">Essayer avec des données de démo</button></section>`;
   }
-  pend.forEach((m) => { h += pendingCard(m); });
-  showsPending().slice(0, 3).forEach((s) => { h += showCard(s, true); });
-  showsUpcoming().filter((s) => s.ts < now() + 30 * DAY).slice(0, 2).forEach((s) => { h += showCard(s, false); });
   if (items.length) {
-    const top = items[0]; const nx = nextUnit(top); const p = progress(top);
-    const bg = top.backdrop || top.poster;
-    h += `<section class="hero-card" aria-label="Continuer">
-      <a class="hero-img" href="#item-${top.id}"><div class="bg" style="background:${grad(top.title)}">${bg ? `<img src="${esc(bg)}" alt="" loading="lazy">` : ''}</div>
-        <span class="pill">${esc(TYPES[top.type].label)}${nx && shape(top) === 'episodes' ? ' · ' + esc(nx.label) : ''}</span>
-        <div class="over"><span class="hero-title">${esc(top.title)}</span><span class="small" style="color:#CFE3EA">${nx ? (shape(top) === 'episodes' ? 'Prochain : ' + esc(nx.title) : esc(nx.label)) : esc(progressText(top))}</span></div></a>
-      <div class="col" style="padding:12px 14px 14px;gap:10px">
-        <div class="row between label"><span>${esc(progressText(top))}</span><span>${pct(top)} %</span></div>${bar(pct(top))}
-        ${nx ? `<button class="btn chrome" data-a="next" data-id="${top.id}">${svgIcon('check', 18)}${esc(actionLabel(top, nx))}</button>` : ''}
-        ${top.catchup ? `<span class="label amber" style="text-align:center">Mode rattrapage actif · sans XP</span>` : ''}
+    const top = items[0]; const nx = nextUnit(top); const sh = shape(top);
+    const img = top.backdrop || top.poster;
+    const sub = nx && sh === 'episodes' ? (nx.title && !/^Épisode \d+$/.test(nx.title) ? '« ' + nx.title + ' »' : '') + (nx.rt || top.runtime ? (nx.title && !/^Épisode \d+$/.test(nx.title) ? ' · ' : '') + fmtRt(nx.rt || top.runtime) : '') : '';
+    h += `<section class="hero2" aria-label="${esc(top.title)}, en cours">
+      <a class="img" href="#item-${top.id}" style="background:${grad(top.title)}">${img ? `<img src="${esc(img)}" alt="" loading="lazy">` : ''}<h2 class="it">${esc(top.title)}</h2></a>
+      <div class="body"><div class="col" style="gap:3px"><div class="line"><span>${esc(progressText(top))}</span><span>${pct(top)} %</span></div>${sub ? `<span class="sub">${esc(sub)}</span>` : ''}</div>
+        ${bar(pct(top), 'thick')}
+        ${top.catchup ? `<span class="label amber">Mode rattrapage actif · sans XP</span>` : ''}
+        <div class="acts"><a class="btn prim" href="#item-${top.id}">${svgIcon('play', 18, true)}Continuer</a>${nx ? `<button class="sq" data-a="next" data-id="${top.id}" aria-label="${esc(actionLabel(top, nx))}">${svgIcon('check', 26)}</button>` : ''}</div>
       </div></section>`;
-    if (items.length > 1) {
-      h += `<section class="section" aria-label="Aussi en cours"><h2 class="h2">Aussi en cours</h2>`;
-      items.slice(1).forEach((it) => {
-        const n2 = nextUnit(it);
-        h += `<div class="card-row"><a href="#item-${it.id}" class="row grow" style="color:inherit;text-decoration:none;gap:12px">${itemPoster(it, 'sm')}
-          <div class="col grow" style="gap:4px"><span class="label cyan" style="font-size:10px">${esc(TYPES[it.type].label)}</span><span class="ellipsis" style="font-weight:700;font-size:16px">${esc(it.title)}</span>
-          <span class="small muted">${esc(progressText(it))}</span>${bar(pct(it), 'thin')}</div></a>
-          ${n2 ? `<button class="icon-btn" data-a="next" data-id="${it.id}" aria-label="${esc(actionLabel(it, n2))}">${svgIcon('check', 20)}</button>` : ''}</div>`;
-      });
-      h += `</section>`;
-    }
+    if (items.length > 1) h += `<section class="section" aria-label="Aussi en cours">${secHead('Aussi en cours', '#biblio')}<div class="mrow">${items.slice(1, 10).map((it) => mcard(it, { short: true })).join('')}</div></section>`;
   } else if (userItems.length) {
-    h += `<div class="empty">Rien en cours pour l’instant.<br><a href="#envies">Pioche dans tes envies</a> ou <a href="#ajouter">ajoute quelque chose</a>.</div>`;
+    h += `<div class="empty">Rien en cours pour l’instant.<br><a href="#envies">Pioche dans tes envies</a> ou ajoute quelque chose avec +.</div>`;
   }
-  if (goals.length) {
-    const met = goals.filter((g) => g.met).length;
-    h += `<a class="amber-card row" href="#profil" style="padding:12px 14px;gap:12px;text-decoration:none;color:inherit">
-      <span class="medal" style="width:38px;height:38px">${svgIcon('target', 18)}</span>
-      <div class="col grow" style="gap:6px"><div class="row between label amber"><span>Objectifs ${esc(MONTHS[new Date().getMonth()])}</span><span>${met} / ${goals.length}</span></div>${bar(Math.round((met / goals.length) * 100), 'thin amber')}</div></a>`;
+  if (pend.length || pshows.length) {
+    h += `<section class="section" aria-label="À confirmer">${secHead('Tu l’as vu ?')}<div class="list">${pend.map((m) => `<div class="lrow"><a href="#match-${m.id}" style="display:contents;color:inherit">${matchThumb(m)}<div class="tx"><span class="tag cy">${esc(fmtDay(m.ts))} · ${esc(m.league || '')}</span><b>${esc(m.home)} – ${esc(m.away)}</b></div></a><button class="go" data-a="match-confirm" data-id="${m.id}">Noter</button></div>`).join('')}
+      ${pshows.map((x) => `<div class="lrow"><button data-a="show-open" data-id="${x.id}" style="display:contents">${posterHtml(x.name, x.poster, 'th')}<div class="tx" style="text-align:left"><span class="tag cy">${esc(fmtDay(x.ts))} · ${esc(x.fed)}</span><b>${esc(x.name)}</b></div></button><button class="go" data-a="show-confirm" data-id="${x.id}">Noter</button></div>`).join('')}</div></section>`;
+  }
+  if (upcoming.length) {
+    h += `<section class="section" aria-label="À venir"><div class="sec-head"><h2 class="h2">À venir</h2><button class="link" data-a="goto-catch">Voir tout${svgIcon('chevR', 15)}</button></div><div class="mgrid">${upcoming.map((x) => `<button class="ev" data-a="show-open" data-id="${x.id}">${posterHtml(x.name, x.poster, '')}<div class="bd"><span class="date">${esc(new Date(x.ts).toLocaleDateString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short' }).replace(/\.$/, ''))}</span><span class="nm">${esc(x.name)}</span><span class="sb">${pad2(new Date(x.ts).getHours())}:${pad2(new Date(x.ts).getMinutes())} · ${esc(x.fed)}</span></div></button>`).join('')}</div></section>`;
   }
   return `<main class="view">${h}</main>${navHtml('encours')}${fab()}`;
+}
+function fmtRt(m) { m = Math.round(m || 0); if (!m) return ''; return m >= 60 ? Math.floor(m / 60) + ' h ' + pad2(m % 60) : m + ' min'; }
+function matchThumb(m) {
+  if (m.cover) return posterHtml(m.home, m.cover, 'th');
+  const side = favTeamSide(m); const t = TEAMS[m.team] || null;
+  const id = side === 'home' ? m.homeId : m.awayId;
+  const logo = (id && state.logos && state.logos[id]) || (t && state.logos && state.logos[t.id]);
+  return `<div class="poster th vig" style="background:radial-gradient(120% 80% at 50% 30%,${t ? t.c1 : '#1E3A48'},${t ? t.c2 : '#071821'} 120%)" aria-hidden="true">${logo ? `<img class="main" src="${esc(logo)}" alt="" style="width:46%">` : `<span class="vig-abbr">${esc(t ? t.abbr : abbr(m.home))}</span>`}</div>`;
 }
 function pendingCard(m) {
   return `<section class="glass pad col" aria-label="Match à confirmer" style="gap:12px">
@@ -898,10 +913,10 @@ function viewBiblio() {
   if (f.type === 'sport') return `<main class="view">${h}${sportSection()}</main>${navHtml('biblio')}${fab('#ajouter-sport')}`;
   if (f.type === 'catch') return `<main class="view">${h}${catchSection()}</main>${navHtml('biblio')}${fab('#ajouter-catch')}`;
   h += `<div class="seg" role="group" aria-label="Statut">${[['tous', 'Tous'], ['encours', 'En cours'], ['termine', 'Terminés']].map(([k, l]) => `<button class="${f.status === k ? 'on' : ''}" data-a="bib-status" data-v="${k}">${l}</button>`).join('')}</div>
-    <label class="search"><span class="sr">Filtrer</span><input class="input" type="search" placeholder="Filtrer par titre…" data-filter="bib"></label>`;
+    <label class="search"><span class="sr">Filtrer</span><input class="input" type="search" placeholder="Filtrer ma bibliothèque" data-filter="bib"></label>`;
   const list = Object.values(state.items).filter((i) => i.status !== 'envie' && (f.type === 'tout' || i.type === f.type) && (f.status === 'tous' || i.status === f.status) && i.type !== 'catch')
     .sort((a, b) => b.updatedAt - a.updatedAt);
-  h += list.length ? `<div class="grid3">${list.map(tileHtml).join('')}</div>` : `<div class="empty">Rien ici pour l’instant.</div>`;
+  h += list.length ? `<div class="mgrid">${list.map((it) => mcard(it)).join('')}</div>` : `<div class="empty">Rien ici pour l’instant.${f.type === 'tout' && f.status === 'tous' ? '' : ' Change de filtre ou ajoute quelque chose avec +.'}</div>`;
   return `<main class="view">${h}</main>${navHtml('biblio')}${fab()}`;
 }
 function tileHtml(it) {
@@ -957,9 +972,15 @@ function catchSection() {
 
 /* ---------- Envies ---------- */
 function viewEnvies() {
-  const list = Object.values(state.items).filter((i) => i.status === 'envie').sort((a, b) => b.createdAt - a.createdAt);
+  const f = ui.envies || (ui.envies = { type: 'tout' });
+  const all = Object.values(state.items).filter((i) => i.status === 'envie').sort((a, b) => b.createdAt - a.createdAt);
+  const types = ['tout', ...['film', 'serie', 'anime', 'doc', 'livre', 'bd', 'manga', 'jeu'].filter((t) => all.some((i) => i.type === t))];
+  const list = all.filter((i) => f.type === 'tout' || i.type === f.type);
+  const acts = (it) => `<div class="acts"><button class="btn prim" data-a="item-status" data-id="${it.id}" data-v="encours">${svgIcon('play', 13, true)}Commencer</button><button class="icon-btn" data-a="item-del" data-id="${it.id}" aria-label="Retirer ${esc(it.title)} des envies">${svgIcon('x', 16)}</button></div>`;
   return `<main class="view"><div class="head"><h1 class="h1">Envies</h1>${levelChip()}</div>${demoBanner()}
-    ${list.length ? `<div class="grid3">${list.map(tileHtml).join('')}</div>` : `<div class="empty">Ta liste d’envies est vide.<br>Ajoute ce que tu veux voir, lire ou jouer.</div>`}
+    ${all.length ? `<div class="chips" role="group" aria-label="Catégorie">${types.map((k) => `<button class="chip ${f.type === k ? 'on' : ''}" data-a="env-type" data-v="${k}" aria-pressed="${f.type === k}">${k === 'tout' ? 'Tout' : esc(TYPES[k].plural)}</button>`).join('')}</div>
+    <label class="search"><span class="sr">Rechercher</span><input class="input" type="search" placeholder="Rechercher dans mes envies" data-filter="bib"></label>` : ''}
+    ${list.length ? `<div class="mgrid">${list.map((it) => mcard(it, { extra: acts(it) })).join('')}</div>` : `<div class="empty">Ta liste d’envies est vide.<br>Ajoute ce que tu veux voir, lire ou jouer avec +.</div>`}
   </main>${navHtml('envies')}${fab()}`;
 }
 
@@ -1013,29 +1034,70 @@ function sportVignette(t, list) {
 function fedVignette(fed) {
   return `<div class="poster fill vig" style="background:radial-gradient(120% 80% at 50% 30%,hsl(${hashHue(fed)},45%,30%),#0A1A24 120%)" aria-hidden="true"><span class="vig-abbr" style="font-size:${fed.length <= 4 ? 34 : fed.length <= 7 ? 24 : 17}px">${esc(fed)}</span></div>`;
 }
+function histoRows(evs) {
+  // une ligne par œuvre et par jour
+  const map = new Map();
+  for (const e of evs) {
+    const d = new Date(e.ts); const day = d.getFullYear() + '-' + d.getMonth() + '-' + d.getDate();
+    let key = e.item + '|' + day;
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(e);
+  }
+  const rows = [];
+  for (const list of map.values()) {
+    list.sort((a, b) => a.ts - b.ts);
+    const e = list[list.length - 1]; const k = e.kind; let th, title, what, tag = '', note = '', href = '';
+    if (k === 'match') {
+      const m = state.matches[String(e.item).slice(2)];
+      title = m ? m.home + ' – ' + m.away : (e.title || 'Match'); th = m ? matchThumb(m) : posterHtml('Match', '', 'th');
+      what = (m && m.league ? m.league + ' · ' : '') + (MODES[e.mode] ? (e.mode === 'resume' ? 'Résumé' : 'Vu en ' + MODES[e.mode].toLowerCase()) : 'Vu'); href = m ? '#match-' + m.id : '';
+    } else if (k === 'catch') {
+      const c = state.catchLog.find((x) => 'c:' + x.id === e.item);
+      title = (c && c.show) || e.show || e.fed; th = c && c.poster ? posterHtml(title, c.poster, 'th') : fedVignette(e.fed).replace('poster fill vig', 'poster th vig');
+      tag = CKINDS[e.catchKind] || ''; what = e.fed + (MODES[e.mode] ? ' · ' + (e.mode === 'resume' ? 'Résumé' : 'En ' + MODES[e.mode].toLowerCase()) : ''); note = c && c.note;
+    } else {
+      const it = state.items[e.item]; if (!it) continue;
+      title = it.title; href = '#item-' + it.id; th = posterHtml(it.title, it.backdrop || it.poster, 'th');
+      if (k === 'ep') {
+        const infos = list.filter((x) => x.kind === 'ep').map((x) => epInfo(it, x.key)).filter(Boolean);
+        if (it.type === 'catch') what = plural(infos.length, 'show');
+        else if (infos.length === 1) { const i = infos[0]; what = (it.seasons.length > 1 ? 'S' + i.s + ' · ' : '') + 'Ép. ' + i.e + (i.title && !/^Épisode \d+$/.test(i.title) ? ' · ' + i.title : ''); }
+        else { const a = infos[0], b = infos[infos.length - 1]; what = (it.seasons.length > 1 ? 'S' + a.s + ' · ' : '') + 'Ép. ' + a.e + ' à ' + (a.s !== b.s ? 'S' + b.s + ' · ' : '') + b.e; }
+      } else if (k === 'tome') { const ns = list.filter((x) => x.kind === 'tome').map((x) => +x.key.slice(1)).sort((a, b) => a - b); what = ns.length === 1 ? 'Tome ' + ns[0] + ' lu' : 'Tomes ' + ns[0] + ' à ' + ns[ns.length - 1]; }
+      else if (k === 'livre_fin') what = it.volumes.length > 1 ? 'Tome ' + e.key.slice(1) + ' terminé' : 'Livre terminé' + (e.pages ? ' · ' + e.pages + ' p.' : '');
+      else if (k === 'livre_mi') what = 'À mi-parcours';
+      else if (k === 'film') what = e.rewatch ? 'Film revu' : 'Film vu';
+      else if (k === 'jeu') what = 'Jeu terminé';
+      else what = TYPES[it.type] ? TYPES[it.type].label : '';
+      if (e.rewatch && k !== 'film') what += ' · revisionnage';
+    }
+    rows.push({ ts: e.ts, type: k === 'match' ? 'sport' : k === 'catch' ? 'catch' : e.type, th, title, what, tag, note, href, xp: list.reduce((a, x) => a + (x.xp || 0), 0) });
+  }
+  return rows.sort((a, b) => b.ts - a.ts);
+}
+const HISTO_CATS = [['tout', 'Tout'], ['film', 'Films'], ['serie', 'Séries'], ['anime', 'Anime'], ['livre', 'Livres'], ['manga', 'Manga'], ['sport', 'Sport'], ['catch', 'Catch']];
 function viewHisto() {
-  const months = activeMonths();
-  ui.histo = clamp(ui.histo, 0, months.length - 1);
-  const mk = months[ui.histo];
-  const evs = realEvents().filter((e) => monthKey(e.ts) === mk);
-  const goals = goalResults(mk, evs);
-  const badges = badgeStates().filter((b) => b.won && b.ts && monthKey(b.ts) === mk);
-  const groups = monthGroups(mk);
-  const year = mk.slice(0, 4);
-  const catchN = evs.filter((e) => e.kind === 'catch' || (e.kind === 'ep' && e.type === 'catch')).length;
-  let h = `<div class="head"><h1 class="h1">Historique</h1>${levelChip()}</div>${demoBanner()}
-    <div class="row"><button class="icon-btn" data-a="histo" data-v="1" aria-label="Mois précédent" ${ui.histo >= months.length - 1 ? 'disabled style="opacity:.3"' : ''}>${svgIcon('chevL', 18)}</button>
-      <span class="grow" style="text-align:center;font-family:var(--f-title);font-weight:700;font-size:22px;letter-spacing:2px;text-transform:uppercase">${monthLabel(mk)}</span>
-      <button class="icon-btn" data-a="histo" data-v="-1" aria-label="Mois suivant" ${ui.histo <= 0 ? 'disabled style="opacity:.3"' : ''}>${svgIcon('chevR', 18)}</button></div>
-    <section class="glass pad col" style="gap:14px" aria-label="Résumé du mois">
-      <div class="row between" style="align-items:flex-end"><div class="col" style="gap:2px"><span class="label">XP gagnée</span><span class="gtext" style="font-family:var(--f-title);font-weight:800;font-size:48px;line-height:.95">+${fmtNum(monthXp(mk))} XP</span></div>
-      ${goals.length ? `<span class="pill amber">Objectifs ${goals.filter((g) => g.met).length} / ${goals.length}</span>` : ''}</div>
-      <div class="counters">${[['épisodes', countCat(evs, 'episodes')], ['films', countCat(evs, 'films')], ['tomes', countCat(evs, 'tomes')], [catchN ? 'catch' : 'matchs', catchN ? catchN : countCat(evs, 'matchs')]].map(([l, v]) => `<div class="counter"><b>${v}</b><span class="label">${l}</span></div>`).join('')}</div>
-      ${catchN ? `<span class="small muted" style="text-align:center">${plural(countCat(evs, 'matchs'), 'match')} ce mois-ci</span>` : ''}
-    </section>`;
-  if (badges.length) h += `<section class="section"><h2 class="h2">Badges du mois</h2><div class="grid3">${badges.map((b) => `<div class="badge-cell amber-card" style="padding:12px 6px"><span class="medal" style="width:46px;height:46px">${svgIcon(b.icon, 22)}</span><b style="font-size:12px">${esc(b.label)}</b><span class="muted">${esc(fmtDay(b.ts))}</span></div>`).join('')}</div></section>`;
-  h += `<section class="section"><h2 class="h2">Vu et lu</h2>${groups.length ? `<div class="grid3">${groups.map((g) => `<${g.href ? `a href="${g.href}"` : 'div'} class="tile">${g.poster}<span class="t ellipsis">${esc(g.title)}</span><span class="d">${esc(g.kind)} · ${esc(g.detail)}</span></${g.href ? 'a' : 'div'}>`).join('')}</div>` : `<div class="empty">Rien de noté ce mois-ci.</div>`}</section>
-    <a class="btn accent block" href="#rewind-${year}">${svgIcon('redo', 18)}Ton Rewind ${year}</a>`;
+  const f = ui.histoF || (ui.histoF = 'tout');
+  const typeOk = (r) => f === 'tout' || r.type === f || (f === 'livre' && (r.type === 'bd' || r.type === 'livre')) || (f === 'serie' && r.type === 'doc');
+  const rows = histoRows(realEvents().filter((e) => !isBonus(e))).filter(typeOk);
+  const d0 = new Date(); d0.setHours(0, 0, 0, 0); const t0 = d0.getTime();
+  const groups = []; const add = (key, label, r) => { let g = groups.find((x) => x.key === key); if (!g) groups.push(g = { key, label, rows: [] }); g.rows.push(r); };
+  rows.forEach((r) => {
+    if (r.ts >= t0) add('t', 'Aujourd’hui', r);
+    else if (r.ts >= t0 - 6 * DAY) add('w', 'Cette semaine', r);
+    else { const mk = monthKey(r.ts); add(mk, monthLabel(mk), r); }
+  });
+  const when = (r) => r.ts >= t0 ? pad2(new Date(r.ts).getHours()) + ':' + pad2(new Date(r.ts).getMinutes()) : r.ts >= t0 - 6 * DAY ? new Date(r.ts).toLocaleDateString('fr-FR', { weekday: 'short' }).replace(/\.$/, '') : fmtDay(r.ts);
+  const used = HISTO_CATS.filter(([k]) => k === 'tout' || histoRows(realEvents().filter((e) => !isBonus(e))).some((r) => r.type === k || (k === 'livre' && r.type === 'bd') || (k === 'serie' && r.type === 'doc')));
+  let h = `<div class="head"><h1 class="h1" style="font-size:clamp(32px, 10vw, 44px)">Historique</h1>${levelChip()}</div>${demoBanner()}
+    <div class="chips" role="group" aria-label="Catégorie">${used.map(([k, l]) => `<button class="chip ${f === k ? 'on' : ''}" data-a="histo-type" data-v="${k}" aria-pressed="${f === k}">${l}</button>`).join('')}</div>`;
+  if (!groups.length) h += `<div class="empty">Rien de noté pour l’instant.<br>Ce que tu coches apparaîtra ici, jour après jour.</div>`;
+  groups.slice(0, 14).forEach((g) => {
+    h += `<section class="section">${`<div class="sec-head"><h2 class="h2" style="text-transform:${g.key.length > 1 ? 'capitalize' : 'none'}">${esc(g.label)}</h2><span class="small muted" style="font-size:14px">${g.rows.length}</span></div>`}
+      <div class="list">${g.rows.map((r) => `<${r.href ? `a href="${r.href}"` : 'div'} class="lrow">${r.th}<div class="tx">${r.tag ? `<span class="tag">${esc(r.tag)}</span>` : ''}<b>${esc(r.title)}</b><span>${esc(r.what)}</span>${r.note ? `<i>« ${esc(r.note)} »</i>` : ''}</div><span class="when">${esc(when(r))}</span></${r.href ? 'a' : 'div'}>`).join('')}</div></section>`;
+  });
+  const year = new Date().getFullYear();
+  h += `<a class="btn prim block" href="#rewind-${year}">${svgIcon('redo', 18)}Ton Rewind ${year}</a>`;
   return `<main class="view">${h}</main>${navHtml('histo')}`;
 }
 
@@ -1071,24 +1133,60 @@ function viewRewind(year) {
 }
 
 /* ---------- Profil ---------- */
+function badgeProgress(b) {
+  const evs = realEvents();
+  const cnt = (fn) => evs.filter(fn).length;
+  const T = { ep100: [(e) => e.kind === 'ep' && e.type !== 'catch', 100], ep500: [(e) => e.kind === 'ep' && e.type !== 'catch', 500], films10: [(e) => e.kind === 'film', 10], films50: [(e) => e.kind === 'film', 50],
+    livre1: [(e) => e.kind === 'livre_fin', 1], livres10: [(e) => e.kind === 'livre_fin', 10], tomes25: [(e) => e.kind === 'tome', 25], jeu1: [(e) => e.kind === 'jeu', 1], jeux5: [(e) => e.kind === 'jeu', 5],
+    match10: [(e) => e.kind === 'match', 10], sixers20: [(e) => e.kind === 'match' && e.team === 'sixers', 20], milan20: [(e) => e.kind === 'match' && e.team === 'milan', 20],
+    catch10: [(e) => e.kind === 'catch' || (e.kind === 'ep' && e.type === 'catch'), 10], revoir: [(e) => e.rewatch && !isBonus(e), 1] };
+  if (T[b.id]) { const n = cnt(T[b.id][0]); return { cur: Math.min(n, T[b.id][1]), max: T[b.id][1], sub: fmtNum(Math.min(n, T[b.id][1])) + ' / ' + fmtNum(T[b.id][1]) }; }
+  if (b.id === 'pages1000') { const n = evs.filter((e) => e.kind === 'livre_fin').reduce((a, e) => a + (e.pages || 0), 0); return { cur: Math.min(n, 1000), max: 1000, sub: fmtNum(Math.min(n, 1000)) + ' / 1 000 p.' }; }
+  if (b.id === 'niv5' || b.id === 'niv10') { const L = levelInfo(); const t = b.id === 'niv5' ? 5 : 10; return { cur: L.lvl - 1 + L.pct / 100, max: t - 1, sub: 'Niv. ' + L.lvl + ' / ' + t }; }
+  if (b.id === 'mois') { const g = goalResults(monthKey(now())); return { cur: g.filter((x) => x.met).length, max: g.length || 1, sub: g.filter((x) => x.met).length + ' / ' + g.length + ' objectifs' }; }
+  const enc = Object.values(state.items).filter((i) => i.status === 'encours' && i.type !== 'catch');
+  if (b.id === 'saison') {
+    let best = null;
+    enc.filter((i) => shape(i) === 'episodes').forEach((i) => { const nx = nextUnit(i); if (!nx) return; const done = nx.e - 1; const r = done / nx.season.count; if (!best || r > best.r) best = { r, sub: i.title + ' · S' + nx.s + ' · ' + done + ' / ' + nx.season.count }; });
+    return best ? { cur: best.r, max: 1, sub: best.sub } : { cur: 0, max: 1, sub: 'Aucune saison en cours' };
+  }
+  const pick = (fn) => { let best = null; enc.filter(fn).forEach((i) => { const p = progress(i); if (p.total && (!best || p.done / p.total > best.r)) best = { r: p.done / p.total, sub: i.title + ' · ' + p.done + ' / ' + p.total }; }); return best ? { cur: best.r, max: 1, sub: best.sub } : { cur: 0, max: 1, sub: '—' }; };
+  if (b.id === 'serie') return pick((i) => shape(i) === 'episodes');
+  if (b.id === 'saga') return pick((i) => shape(i) === 'tomes' || (shape(i) === 'livre' && i.volumes.length > 1));
+  return { cur: 0, max: 1, sub: '' };
+}
+function badgeRow(b) {
+  const pr = b.won ? null : badgeProgress(b);
+  return `<div class="lrow" style="padding:12px 14px"><span class="bdg ${b.won ? 'won' : ''}">${svgIcon(b.icon, 22)}</span><div class="tx" style="gap:7px"><div class="row between" style="gap:8px;align-items:baseline"><b>${esc(b.label)}</b><span style="font-size:13px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${b.won ? esc(b.ts ? fmtDay(b.ts) : 'Obtenu') : esc(pr.sub)}</span></div>${b.won ? '' : bar(Math.round((pr.cur / pr.max) * 100), 'thin')}</div></div>`;
+}
 function viewProfil() {
   const L = levelInfo(); const mk = monthKey(now()); const goals = goalResults(mk);
   const bs = badgeStates(); const won = bs.filter((b) => b.won);
+  const next = bs.filter((b) => !b.won).map((b) => Object.assign(b, { pr: badgeProgress(b) })).sort((a, b) => b.pr.cur / b.pr.max - a.pr.cur / a.pr.max).slice(0, 3);
   const s = state.settings;
-  const deg = Math.round((L.pct / 100) * 360);
+  const evs = realEvents().filter((e) => monthKey(e.ts) === mk);
+  const seriesN = new Set(evs.filter((e) => e.kind === 'ep' && e.type !== 'catch').map((e) => e.item)).size;
+  const R = 50, C = 2 * Math.PI * R;
+  const GI = { episodes: 'play', films: 'film', tomes: 'book', matchs: 'ball' };
   return `<main class="view"><div class="head"><h1 class="h1">Profil</h1></div>${demoBanner()}
-  <section class="glass pad row" style="gap:16px" aria-label="Niveau">
-    <div class="ring" role="img" aria-label="Niveau ${L.lvl}, ${L.into} XP sur ${L.need}" style="background:conic-gradient(#7FD6F0 0deg,#B9A8FF ${deg}deg,rgba(255,255,255,.08) ${deg}deg)"><div><span class="label">Niveau</span><b>${L.lvl}</b></div></div>
-    <div class="col grow" style="gap:6px"><span class="gtext" style="font-family:var(--f-title);font-weight:800;font-size:28px;line-height:1">${fmtNum(L.into)} / ${fmtNum(L.need)} XP</span>
-      <span class="small" style="color:#CFE3EA">Plus que ${fmtNum(L.need - L.into)} XP avant le niveau ${L.lvl + 1}</span><span class="small muted">Total : ${fmtNum(L.xp)} XP</span></div>
+  <section class="glass lvl-card" aria-label="Niveau">
+    <svg class="ring2" viewBox="0 0 120 120" role="img" aria-label="Niveau ${L.lvl}, ${L.into} XP sur ${L.need}"><defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#82D7EC"/><stop offset="1" stop-color="#AD98F5"/></linearGradient></defs>
+      <circle cx="60" cy="60" r="${R}" fill="none" stroke="#1E3A48" stroke-width="10"/><circle cx="60" cy="60" r="${R}" fill="none" stroke="url(#lg)" stroke-width="10" stroke-linecap="round" stroke-dasharray="${(C * L.pct / 100).toFixed(1)} ${C.toFixed(1)}" transform="rotate(-90 60 60)"/>
+      <text x="60" y="76" text-anchor="middle" fill="#F3F7FA" style="font-family:var(--f-title);font-weight:800;font-style:italic;font-size:46px">${L.lvl}</text></svg>
+    <div class="col" style="gap:6px"><span class="lvl" style="margin:0"><span class="label">${CROWN}NIVEAU ${L.lvl}</span></span>
+      <span class="it" style="font-size:34px;line-height:1;text-transform:none">${fmtNum(L.into)} <span style="color:var(--muted);font-size:24px">/ ${fmtNum(L.need)} XP</span></span>
+      <span style="font-size:14px;color:var(--soft);line-height:1.4">Plus que <b style="color:var(--text)">${fmtNum(L.need - L.into)} XP</b> avant le niveau ${L.lvl + 1}.</span><span class="small muted">Total : ${fmtNum(L.xp)} XP</span></div>
   </section>
-  <section class="glass pad col" style="gap:12px" aria-label="Objectifs du mois">
-    <div class="row between"><h2 class="h2" style="color:var(--text)">Objectifs de ${esc(MONTHS[new Date().getMonth()])}</h2><button class="link" data-a="edit-goals">Modifier</button></div>
-    ${goals.length ? goals.map((g) => `<div class="col" style="gap:6px"><div class="row between"><span style="font-weight:600">${esc(g.label)}</span><span class="label ${g.met ? 'amber' : ''}">${g.count} / ${g.target}</span></div>${bar(Math.round((g.count / g.target) * 100), 'thin' + (g.met ? ' amber' : ''))}</div>`).join('') : '<span class="muted small">Aucun objectif ce mois-ci.</span>'}
-    <span class="small muted">Chaque objectif atteint rapporte ${XP.goal} XP.</span>
-  </section>
-  <section class="section" aria-label="Badges"><div class="row between"><h2 class="h2">Badges</h2><span class="label">${won.length} / ${bs.length}</span></div>
-    <div class="grid4">${bs.sort((a, b) => (b.won ? 1 : 0) - (a.won ? 1 : 0)).map((b) => `<div class="badge-cell ${b.won ? '' : 'locked'}"><span class="medal lg ${b.won ? '' : 'locked'}">${svgIcon(b.won ? b.icon : 'lock', 24)}</span>${esc(b.label)}${b.won && b.ts ? `<span class="muted" style="font-size:10px">${esc(fmtDay(b.ts))}</span>` : ''}</div>`).join('')}</div></section>
+  <section class="section">${secHead('Ce mois-ci')}<div class="stats">
+    <div class="glass stat">${svgIcon('film', 22)}<b>${countCat(evs, 'films')}</b><span>${countCat(evs, 'films') > 1 ? 'Films terminés' : 'Film terminé'}</span></div>
+    <div class="glass stat">${svgIcon('tv', 22)}<b>${seriesN}</b><span>Séries suivies</span></div>
+    <div class="glass stat">${svgIcon('book', 22)}<b>${countCat(evs, 'tomes')}</b><span>Livres et tomes</span></div>
+    <div class="glass stat">${svgIcon('play', 22)}<b>${countCat(evs, 'episodes')}</b><span>Épisodes regardés</span></div></div></section>
+  <section class="section" aria-label="Objectifs du mois"><div class="sec-head"><h2 class="h2">Objectifs de ${esc(MONTHS[new Date().getMonth()])}</h2><button class="link" data-a="edit-goals" style="color:var(--cyan);font-weight:600">Modifier</button></div>
+    <div class="glass pad col" style="gap:16px">${goals.length ? goals.map((g) => `<div class="goal-line"><div class="top">${svgIcon(GI[g.key] || 'target', 18)}<span class="grow" style="font-size:15px;font-weight:600">${esc(g.label)}</span><b style="${g.met ? 'color:var(--amber)' : ''}">${g.count} <span style="color:var(--muted)">/ ${g.target}</span></b></div>${bar(Math.round((g.count / g.target) * 100), 'thick' + (g.met ? ' amber' : ''))}</div>`).join('') : '<span class="muted small">Aucun objectif ce mois-ci.</span>'}
+    <span class="small muted">Chaque objectif atteint rapporte ${XP.goal} XP.</span></div></section>
+  <section class="section" aria-label="Badges"><div class="sec-head"><h2 class="h2">Prochains badges</h2><button class="link" data-a="badges-all">Voir tout (${won.length} / ${bs.length})${svgIcon('chevR', 15)}</button></div>
+    <div class="list">${next.length ? next.map(badgeRow).join('') : '<div class="lrow"><span class="tx"><b>Tous les badges sont obtenus !</b></span></div>'}</div></section>
   <section class="glass pad col" style="gap:12px" aria-label="Réglages">
     <h2 class="h2" style="color:var(--text)">Réglages</h2>
     <form class="col" style="gap:12px" data-form="keys">
@@ -1180,9 +1278,9 @@ function matchForm() {
     <label class="field"><span>Vu en</span><select class="input" name="mode"><option value="direct">Direct</option><option value="differe" selected>Différé</option><option value="resume">Résumé</option><option value="">Pas encore vu</option></select></label>
     <button class="btn chrome block" type="submit">Ajouter le match</button></form>`;
 }
-function posterField(cur, f) {
+function posterField(cur, f, label) {
   f = f || 'poster'; const wide = f === 'backdrop';
-  return `<div class="field"><span>${wide ? 'Bannière' : 'Affiche'} (facultatif)</span>
+  return `<div class="field"><span>${label || (wide ? 'Bannière' : 'Affiche') + ' (facultatif)'}</span>
     <div class="row" style="gap:12px;align-items:center"><div class="poster ${wide ? 'wide' : 'sm'}" data-preview="${f}" style="background:${grad(wide ? 'banniere' : 'affiche')}">${cur ? `<img src="${esc(cur)}" alt="">` : `<span class="ph">${svgIcon('upload', 18)}</span>`}</div>
       <div class="col grow" style="gap:8px"><label class="btn" style="cursor:pointer">${svgIcon('upload', 18)}Choisir une image<input type="file" accept="image/*" data-change="poster-file" data-field="${f}" class="sr"></label>
       <input class="input" name="${f}Url" ${f === 'poster' ? 'data-keep="url"' : ''} value="${cur && !cur.startsWith('data:') && ui.route === 'ajouter' ? esc(cur) : ''}" placeholder="ou colle un lien d’image" autocomplete="off" inputmode="url"></div></div>
@@ -1364,7 +1462,8 @@ function viewMatch(id) {
   const awayColor = side === 'away' && t ? t.c1 : `hsl(${hashHue(m.away)},45%,32%)`;
   let res = '';
   if (hasScore && side && show) { const mine = side === 'home' ? m.hs : m.as; const other = side === 'home' ? m.as : m.hs; res = mine > other ? 'Victoire' : mine < other ? 'Défaite' : 'Nul'; }
-  let h = `<section class="match-hero" style="background:linear-gradient(115deg,${homeColor}99 0%,rgba(6,20,28,.2) 50%,${awayColor}99 100%)">
+  let h = `<section class="match-hero${m.cover ? ' has-cover' : ''}" style="background:linear-gradient(115deg,${homeColor}99 0%,rgba(6,20,28,.2) 50%,${awayColor}99 100%)">
+    ${m.cover ? `<img class="mcover" src="${esc(m.cover)}" alt="">` : ''}
     <button class="icon-btn dark back" data-a="back" aria-label="Retour">${svgIcon('back', 20)}</button>
     <span class="comp label" style="color:#CFE3EA">${esc(m.league || (m.sport === 'nba' ? 'Basket' : 'Football'))}</span>
     <div class="teams"><div class="team">${teamDisc(m.home, side === 'home' ? m.team : null, '', m.homeId)}<span class="nm">${esc(m.home)}</span><span class="small muted">Domicile</span></div>
@@ -1378,6 +1477,10 @@ function viewMatch(id) {
       <div class="seg" role="radiogroup" aria-label="Mode de visionnage">${Object.keys(MODES).map((k) => `<button role="radio" aria-checked="${mode === k}" class="${mode === k ? 'on' : ''}" data-a="match-mode" data-id="${id}" data-v="${k}" style="height:56px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px">${MODES[k]}<span class="label amber" style="font-size:10px">+${k === 'resume' ? XP.matchResume : XP.match} XP</span></button>`).join('')}</div>
       <button class="btn chrome block" data-a="match-seen" data-id="${id}" data-mode="${mode}">${svgIcon('check', 18)}Marquer vu${hasScore ? ' et révéler' : ''}</button>
       <div class="row between">${hasScore && !show ? `<button class="link" data-a="reveal" data-id="${id}">Révéler sans marquer</button>` : '<span></span>'}${m.dismissed ? '<span class="label">Marqué « pas vu »</span>' : `<button class="link" data-a="match-dismiss" data-id="${id}">Pas vu</button>`}</div></section>`;
+  }
+  if (!fut) {
+    h += `<section class="glass pad col" style="gap:12px" aria-label="Couverture"><div class="row between"><h2 class="h2">Couverture</h2>${m.cover ? `<button class="link" data-a="match-cover" data-id="${id}">Changer</button>` : ''}</div>
+      ${m.cover ? `<img src="${esc(m.cover)}" alt="Couverture du match" style="width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:14px">` : `<span class="small muted">Ajoute une photo du match : elle s’affichera en haut de cette page et dans ton historique.</span><button class="btn block" data-a="match-cover" data-id="${id}">${svgIcon('upload', 18)}Ajouter une couverture</button>`}</section>`;
   }
   if (t) {
     const season = seasonOf(m.ts);
@@ -1395,7 +1498,7 @@ function viewMatch(id) {
    ========================================================= */
 function modalHtml() {
   if (!ui.modal) return '';
-  return `<div class="modal-bg" data-a="modal-bg"><div class="modal" role="dialog" aria-modal="true" aria-label="${esc(ui.modal.title || '')}">${ui.modal.title ? `<h2 class="h3">${esc(ui.modal.title)}</h2>` : ''}${ui.modal.html}</div></div>`;
+  return `<div class="modal-bg${ui.modal.sheet ? ' bottom' : ''}" data-a="modal-bg"><div class="modal${ui.modal.sheet ? ' sheet' : ''}" role="dialog" aria-modal="true" aria-label="${esc(ui.modal.title || '')}">${ui.modal.title ? `<h2 class="h3">${esc(ui.modal.title)}</h2>` : ''}${ui.modal.html}</div></div>`;
 }
 function openModal(title, html, extra) { ui.modal = Object.assign({ title, html }, extra || {}); render(); }
 function closeModal() { ui.modal = null; render(); }
@@ -1503,10 +1606,17 @@ const ACT = {
     const it = state.items[d.id];
     confirmBox('Supprimer ?', `<b>${esc(it.title)}</b> et tout son historique (et l’XP associée) seront supprimés. C’est définitif.`, 'Supprimer', () => { deleteItem(it.id); checkUnlocks(true); save(); ui.modal = null; history.back(); }, true);
   },
-  'match-seen'(d) { const m = state.matches[d.id]; withXp(() => matchSee(m, d.mode)); },
+  'goto-catch'() { ui.biblio.type = 'catch'; location.hash = '#biblio'; },
+  'match-seen'(d) { const m = state.matches[d.id]; ui.modal = null; withXp(() => matchSee(m, d.mode)); },
   'match-unsee'(d) { withXp(() => matchUnsee(state.matches[d.id])); },
-  'match-dismiss'(d) { const m = state.matches[d.id]; m.dismissed = true; save(); render(); },
+  'match-dismiss'(d) { const m = state.matches[d.id]; m.dismissed = true; ui.modal = null; save(); render(); },
   'match-mode'(d) { ui.matchMode[d.id] = d.v; render(); },
+  'match-cover'(d) {
+    const m = state.matches[d.id];
+    openModal('Couverture du match', `<form class="col" style="gap:14px" data-form="match-cover" data-id="${m.id}">${posterField(m.cover, 'backdrop', 'Image du match')}
+      ${m.cover ? `<label class="toggle"><input type="checkbox" name="noCover"><span class="sw"></span><span class="grow"><b style="font-size:14px">Retirer la couverture</b></span></label>` : ''}
+      <div class="grid2"><button class="btn" type="button" data-a="modal-close">Annuler</button><button class="btn prim" type="submit">Enregistrer</button></div></form>`);
+  },
   'match-del'(d) { confirmBox('Supprimer ce match ?', 'Le match et l’XP associée seront supprimés.', 'Supprimer', () => { matchUnsee(state.matches[d.id]); delete state.matches[d.id]; checkUnlocks(true); save(); ui.modal = null; history.back(); }, true); },
   reveal(d) { ui.reveal[d.id] = true; render(); },
   async 'sport-sync'() { toast('Récupération des matchs…', '', 1400); const ok = await syncSport(true); toast(ok ? 'Matchs à jour' : 'Impossible de joindre TheSportsDB pour le moment.', '', 2600); },
@@ -1540,11 +1650,24 @@ const ACT = {
   'fed-del'(d) { if (state.feds.length <= 1) return; state.feds.splice(+d.i, 1); save(); fedsModal(); },
   'show-open'(d) { const s0 = state.shows[d.id]; if (s0) showModal(s0); },
   'show-seen'(d) { const s0 = state.shows[d.id]; ui.modal = null; withXp(() => showSee(s0, d.mode)); },
-  'show-dismiss'(d) { state.shows[d.id].dismissed = true; save(); render(); },
+  'show-dismiss'(d) { state.shows[d.id].dismissed = true; ui.modal = null; save(); render(); },
   'show-del'(d) { confirmBox('Supprimer ce show ?', 'Il sera retiré des shows programmés.', 'Supprimer', () => { delete state.shows[d.id]; save(); closeModal(); }, true); },
   'catch-new-show'() {
     openModal('Nouveau show suivi', `<form class="col" style="gap:12px" data-form="catch-show"><label class="field"><span>Nom du show</span><input class="input" name="title" placeholder="Ex. AEW Collision" required></label><div class="grid2"><button class="btn" type="button" data-a="modal-close">Annuler</button><button class="btn chrome" type="submit">Ajouter</button></div></form>`);
   },
+  'add-menu'() {
+    openModal('', `<div class="col" style="gap:18px"><div class="row between"><h2 class="it" style="margin:0;font-size:38px">Ajouter</h2><button class="icon-btn" data-a="modal-close" aria-label="Fermer">${svgIcon('x', 18)}</button></div>
+      <div class="add-grid">${ADD_MENU.map(([t, ic, l, sub]) => `<button class="add-opt" data-a="add-go" data-v="${t}">${svgIcon(ic, 24)}<span class="col" style="gap:2px"><b>${l}</b><span>${sub}</span></span></button>`).join('')}</div></div>`, { sheet: true });
+  },
+  'add-go'(d) { ui.modal = null; ui.add.type = d.v; location.hash = '#ajouter-' + d.v; render(); },
+  'env-type'(d) { ui.envies = { type: d.v }; render(); },
+  'histo-type'(d) { ui.histoF = d.v; render(); },
+  'badges-all'() {
+    const bs = badgeStates().sort((a, b) => (b.won ? 1 : 0) - (a.won ? 1 : 0));
+    openModal('Tous les badges', `<div class="list">${bs.map(badgeRow).join('')}</div><button class="btn block" data-a="modal-close" style="margin-top:12px">Fermer</button>`);
+  },
+  'match-confirm'(d) { const m = state.matches[d.id]; openModal('Tu as vu ce match ?', `<div class="col" style="gap:12px"><span style="font-weight:700">${esc(m.home)} – ${esc(m.away)}</span><span class="small muted">${esc(fmtMatch(m.ts))}</span><div class="seg">${Object.keys(MODES).map((k) => `<button data-a="match-seen" data-id="${m.id}" data-mode="${k}">${MODES[k]}</button>`).join('')}</div><button class="btn block" data-a="match-dismiss" data-id="${m.id}">Pas vu</button></div>`); },
+  'show-confirm'(d) { const x = state.shows[d.id]; openModal('Tu as vu ce show ?', `<div class="col" style="gap:12px"><span style="font-weight:700">${esc(x.name)}</span><span class="small muted">${esc(x.fed)} · ${esc(fmtMatch(x.ts))}</span><div class="seg">${Object.keys(MODES).map((k) => `<button data-a="show-seen" data-id="${x.id}" data-mode="${k}">${MODES[k]}</button>`).join('')}</div><button class="btn block" data-a="show-dismiss" data-id="${x.id}">Pas vu</button></div>`); },
   'bib-type'(d) { ui.biblio.type = d.v; render(); if (d.v === 'sport') syncSport(); },
   'bib-status'(d) { ui.biblio.status = d.v; render(); },
   histo(d) { ui.histo += +d.v; render(); },
@@ -1594,6 +1717,12 @@ function resetState() {
   state = freshState(); Object.assign(state.settings, keep); seedState(); save(); location.hash = '#encours'; render();
 }
 const FORMS = {
+  'match-cover'(fd, form) {
+    const m = state.matches[form.dataset.id]; if (!m) return;
+    const img = String(fd.get('backdropData') || '').trim() || String(fd.get('backdropUrl') || '').trim();
+    if (fd.get('noCover')) delete m.cover; else if (img) m.cover = img;
+    ui.modal = null; save(); render(); toast(fd.get('noCover') ? 'Couverture retirée' : img ? 'Couverture ajoutée' : 'Rien de changé', '', 1800);
+  },
   async search(fd) {
     const q = String(fd.get('q') || '').trim(); if (!q) return;
     const a = ui.add; a.q = q; a.loading = true; a.error = ''; a.results = null; render();
@@ -1770,7 +1899,7 @@ document.addEventListener('change', (e) => { const k = e.target.dataset && e.tar
 document.addEventListener('input', (e) => {
   if (e.target.dataset.filter !== 'bib') return;
   const q = e.target.value.trim().toLowerCase();
-  document.querySelectorAll('.tile[data-title]').forEach((t) => { t.style.display = !q || t.dataset.title.includes(q) ? '' : 'none'; });
+  document.querySelectorAll('.tile[data-title], .mcard[data-title]').forEach((t) => { t.style.display = !q || t.dataset.title.includes(q) ? '' : 'none'; });
 });
 // images qui ne chargent pas : on garde le dégradé
 document.addEventListener('error', (e) => { if (e.target && e.target.tagName === 'IMG') e.target.remove(); }, true);
