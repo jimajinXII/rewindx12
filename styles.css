@@ -216,9 +216,12 @@ button.card-row { cursor: pointer; }
 
 /* à venir */
 .ev { display: flex; flex-direction: column; gap: 9px; border: 0; background: none; color: inherit; text-align: left; padding: 0; font: inherit; }
+/* le cadre prend le format de l'affiche (4:5 pour les galas KHAO/APC, 2:3 pour TMDB) : elle le remplit toujours ;
+   sans affiche (ou si elle ne charge pas), le cadre garde un format 2:3 */
 .ev .poster { width: 100%; height: auto; aspect-ratio: 2 / 3; border-radius: 16px; box-shadow: 0 12px 28px rgba(0, 0, 0, .5); }
-.ev .poster .blur { inset: -20px; width: calc(100% + 40px); height: calc(100% + 40px); object-fit: cover; filter: blur(18px) brightness(.55); }
-.ev .poster img.main { object-fit: contain; }
+.ev .poster:has(img.main) { aspect-ratio: auto; }
+/* « auto 2 / 3 » : 2:3 tant que l'image charge, puis son vrai format */
+.ev .poster img.main { position: relative; inset: auto; height: auto; aspect-ratio: auto 2 / 3; display: block; }
 .ev .bd { padding: 0 2px; display: flex; flex-direction: column; gap: 2px; }
 .ev .date { display: flex; flex-wrap: wrap; align-items: center; gap: 0 6px; font-family: var(--f-body); font-weight: 800; font-size: 12px; letter-spacing: .8px; color: var(--text); text-transform: uppercase; }
 .ev .date .until { color: var(--muted); font-weight: 700; }

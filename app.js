@@ -1291,7 +1291,7 @@ function viewEncours() {
   if (upcoming.length) {
     h += `<section class="section" aria-label="À venir"><div class="sec-head"><h2 class="h2">À venir</h2><button class="link" data-a="goto-catch">Voir tout${svgIcon('chevR', 15)}</button></div><div class="mgrid">${upcoming.map((x) => {
       const live = isToday(x.ts); const t = new Date(x.ts);
-      const po = x.poster ? `<img class="blur" src="${esc(x.poster)}" alt="" loading="lazy"><img class="main" src="${esc(x.poster)}" alt="" loading="lazy">` : '';
+      const po = x.poster ? `<img class="main" src="${esc(x.poster)}" alt="" loading="lazy">` : '';
       return `<button class="ev" data-a="show-open" data-id="${x.id}"><div class="poster" style="background:${grad(x.name)}" aria-hidden="true"><span class="ph">${esc(initials(x.name))}</span>${po}</div><div class="bd"><span class="date${live ? ' live' : ''}">${live ? 'Ce soir' : esc(t.toLocaleDateString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short' }).replace(/\.$/, ''))}${live ? '' : `<span class="until">· ${esc(untilText(x.ts).toLowerCase())}</span>`}</span><span class="nm">${esc(x.name)}</span><span class="sb">${pad2(t.getHours())}:${pad2(t.getMinutes())} · ${esc(x.fed)}</span></div></button>`;
     }).join('')}</div></section>`;
   }
