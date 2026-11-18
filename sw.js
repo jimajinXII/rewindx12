@@ -1,5 +1,5 @@
 /* Rewind – service worker : appli disponible hors connexion + cache des images */
-const VERSION = 'rewind-v3.1.2';
+const VERSION = 'rewind-v3.2.0';
 const SHELL = ['./', './index.html', './styles.css', './app.js', './manifest.webmanifest',
   './icons/icon.svg', './icons/icon-192.png', './icons/icon-512.png', './icons/icon-maskable-512.png'];
 const IMG_HOSTS = ['image.tmdb.org', 's4.anilist.co', 'img.anili.st', 'covers.openlibrary.org', 'media.rawg.io', 'books.google.com', 'books.googleusercontent.com',
@@ -17,9 +17,9 @@ self.addEventListener('fetch', (e) => {
   const url = new URL(req.url);
   if (url.origin === location.origin) {
     // l'appli : réseau d'abord (pour recevoir les mises à jour), cache si hors connexion
+    // seules les réponses valides sont gardées (une erreur 404 ne remplace plus la copie hors ligne)
     e.respondWith(fetch(req, { cache: 'no-cache' }).then((res) => {
-      const copy = res.clone();
-      caches.open(VERSION).then((c) => c.put(req, copy));
+      if (res.ok) { const copy = res.clone(); caches.open(VERSION).then((c) => c.put(req, copy)); }
       return res;
     }).catch(() => caches.match(req).then((r) => r || caches.match('./index.html'))));
     return;
@@ -29,8 +29,17 @@ self.addEventListener('fetch', (e) => {
     // images et polices : cache d'abord, pour rester visibles hors connexion
     // une image demandée en CORS (calcul de la lueur) ne peut pas reprendre une copie « opaque » : on la redemande
     e.respondWith(caches.open('rewind-media').then((c) => c.match(req).then((hit) => (hit && !(req.mode === 'cors' && hit.type === 'opaque')) ? hit : fetch(req).then((res) => {
-      if (res.ok || res.type === 'opaque') c.put(req, res.clone());
+      if (res.ok || res.type === 'opaque') e.waitUntil(c.put(req, res.clone()).then(() => trimMedia(c)).catch(() => {}));
       return res;
     }))));
   }
 });
+// le cache des images ne grossit plus sans fin : on garde les MEDIA_MAX plus récentes
+// (les images « opaques » comptent pour beaucoup dans le quota du téléphone, partagé avec les données)
+const MEDIA_MAX = 400;
+let trimAt = 0;
+function trimMedia(c) {
+  if (Date.now() - trimAt < 30000) return Promise.resolve();
+  trimAt = Date.now();
+  return c.keys().then((keys) => Promise.all(keys.slice(0, Math.max(0, keys.length - MEDIA_MAX)).map((k) => c.delete(k))));
+}

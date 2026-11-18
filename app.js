@@ -3,7 +3,7 @@
    sauf les recherches de titres vers TMDB, AniList (manga), Google Books, Open Library, RAWG et TheSportsDB. */
 'use strict';
 
-const APP_VERSION = '3.1.2';
+const APP_VERSION = '3.2.0';
 const DAY = 86400000;
 
 /* =========================================================
@@ -86,7 +86,7 @@ const fmtNum = (n) => Math.round(n).toLocaleString('fr-FR');
 const hashHue = (s) => { let h = 0; for (const c of String(s)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return h % 360; };
 const grad = (s) => { const h = hashHue(s); return `linear-gradient(160deg,hsl(${h},40%,20%),hsl(${(h + 28) % 360},55%,46%) 60%,hsl(${(h + 45) % 360},65%,74%))`; };
 const initials = (t) => String(t || '?').replace(/^(the|le|la|les|l')\s+/i, '').split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]).join('');
-const abbr = (name) => String(name || '?').replace(/[^A-Za-zÀ-ÿ0-9 ]/g, '').split(' ').filter(Boolean)[0].slice(0, 3).toUpperCase();
+const abbr = (name) => (String(name || '').replace(/[^A-Za-zÀ-ÿ0-9 ]/g, '').split(' ').filter(Boolean)[0] || '?').slice(0, 3).toUpperCase();
 const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
 
 /* =========================================================
@@ -95,7 +95,7 @@ const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
 function freshState() {
   return {
     version: 1, createdAt: now(), demo: false,
-    settings: { tmdbKey: '', rawgKey: '', goals: { films: 4, tomes: 5, episodes: 0, matchs: 8 }, catchTrialStart: now() },
+    settings: { tmdbKey: '', rawgKey: '', pseudo: '', avatar: '', avatarSrc: '', goals: { films: 4, tomes: 5, episodes: 0, matchs: 8 }, catchTrialStart: now() },
     items: {}, events: [], matches: {}, catchLog: [], shows: {}, feds: DEFAULT_FEDS.map((f) => Object.assign({}, f)), goalsByMonth: {}, unlocked: {}, lastLevel: 1,
     lastExport: null, sportSync: 0, logos: {}, logoTry: {}, catchFeed: {}, catchSync: {}, nba: { ids: { PHI: '134863', BOS: '134860' }, feed: {}, lastRun: 0 }
   };
@@ -121,11 +121,14 @@ const store = {
       r.onsuccess = () => res(r.result); r.onerror = () => res(null);
     });
   },
+  // renvoie false si l'écriture a échoué (stockage plein ou indisponible)
   set(k, v) {
     return new Promise((res) => {
-      if (!this.db) { try { localStorage.setItem('rewind:' + k, JSON.stringify(v)); } catch (e) { /* stockage indisponible */ } res(); return; }
-      const t = this.db.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k);
-      t.oncomplete = () => res(); t.onerror = () => res();
+      if (!this.db) { try { localStorage.setItem('rewind:' + k, JSON.stringify(v)); res(true); } catch (e) { res(false); } return; }
+      try {
+        const t = this.db.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k);
+        t.oncomplete = () => res(true); t.onerror = () => res(false); t.onabort = () => res(false);
+      } catch (e) { res(false); }
     });
   },
   del(k) {
@@ -168,15 +171,26 @@ async function rehydrate(obj) {
 let saveTimer = null;
 function save() { memoClear(); clearTimeout(saveTimer); saveTimer = setTimeout(flush, 250); }
 let imgGcAt = 0;
-async function flush() {
-  clearTimeout(saveTimer); memoClear();
+let flushChain = Promise.resolve();
+let saveWarned = false;
+// les sauvegardes passent l'une après l'autre : deux sauvegardes simultanées pouvaient effacer une image tout juste ajoutée
+function flush() {
+  clearTimeout(saveTimer);
+  flushChain = flushChain.then(flushNow, flushNow);
+  return flushChain;
+}
+async function flushNow() {
+  memoClear();
   imgPending = new Map();
   const light = JSON.parse(JSON.stringify(state, imgReplacer));
   const used = imgPending; imgPending = null;
-  for (const [id, d] of used) if (!imgSaved.has(id)) { await store.set('img:' + id, d); imgSaved.add(id); }
-  await store.set('state', light);
+  let ok = true;
+  for (const [id, d] of used) if (!imgSaved.has(id)) { if (await store.set('img:' + id, d)) imgSaved.add(id); else ok = false; }
+  if (!(await store.set('state', light))) ok = false;
+  if (!ok && !saveWarned) { saveWarned = true; toast('Sauvegarde impossible sur ce téléphone (stockage plein ?). Exporte tes données depuis le Profil.', '', 6000); }
+  if (ok) saveWarned = false;
   // ménage des images qui ne servent plus (au plus une fois par minute)
-  if (now() - imgGcAt > 60000) {
+  if (ok && now() - imgGcAt > 60000) {
     imgGcAt = now();
     const keys = await store.keys();
     for (const k of keys) if (String(k).startsWith('img:') && !used.has(k.slice(4))) { await store.del(k); imgSaved.delete(k.slice(4)); }
@@ -267,10 +281,16 @@ function progress(item, pass) {
 }
 function pct(item) { const p = progress(item); return p.total ? Math.round((p.done / p.total) * 100) : 0; }
 // séries à plusieurs saisons : la barre suit la saison en cours (comme le texte « S1 · Épisode 15 / 32 »)
+// la barre suit la saison en cours (épisodes vus de cette saison / épisodes de la saison), comme le texte « 2 / 10 vus »
 function curPct(item) {
-  if (shape(item) === 'episodes' && item.seasons.length > 1) { const nx = nextUnit(item); if (nx && nx.season.count) return Math.round(((nx.e - 1) / nx.season.count) * 100); }
+  if (shape(item) === 'episodes' && item.type !== 'catch') {
+    const nx = nextUnit(item);
+    if (nx && nx.season && nx.season.count) return Math.round((epCountDone(item, nx.season) / nx.season.count) * 100);
+  }
   return pct(item);
 }
+const epLabel = (item, nx) => (item.seasons.length > 1 ? 'S' + nx.s + ' · ' : '') + 'Ép. ' + nx.e;
+// « Prochain : S1 · Ép. 3 » (ce qui t'attend)…
 function progressText(item) {
   const p = progress(item); const sh = shape(item);
   if (sh === 'episodes') {
@@ -278,15 +298,26 @@ function progressText(item) {
     const nx = nextUnit(item);
     if (!p.total) return 'Aucun épisode';
     if (!nx) return item.ended ? 'Terminé · ' + p.total + ' ép.' : 'À jour · ' + p.done + ' ép.';
-    return (item.seasons.length > 1 ? 'S' + nx.s + ' · ' : '') + 'Épisode ' + nx.e + ' / ' + (item.seasons.length > 1 ? nx.season.count : p.total);
+    return 'Prochain : ' + epLabel(item, nx);
   }
-  if (sh === 'tomes') { const nx = nextUnit(item); return nx ? 'Tome ' + nx.n + ' / ' + p.total : 'Terminé · ' + plural(p.total, 'tome'); }
+  if (sh === 'tomes') { const nx = nextUnit(item); return nx ? 'Prochain : tome ' + nx.n : 'Terminé · ' + plural(p.total, 'tome'); }
   if (sh === 'livre') {
-    if (item.volumes.length === 1) return p.done >= 1 ? 'Lu' : p.done ? 'À mi-parcours' : 'Pas commencé';
-    const nx = nextUnit(item); return nx ? 'Tome ' + nx.n + ' / ' + p.total + (nx.mid ? '' : ' · moitié lue') : 'Saga terminée';
+    if (item.volumes.length === 1) return p.done >= 1 ? 'Lu' : p.done ? 'Lu à moitié' : 'Pas commencé';
+    const nx = nextUnit(item); return nx ? 'Prochain : tome ' + nx.n + (nx.mid ? '' : ' · moitié lue') : 'Saga terminée';
   }
   if (sh === 'jeu') return p.done ? 'Terminé' : item.status === 'encours' ? 'En cours' : 'Pas commencé';
   return p.done ? (item.passes.length > 1 ? 'Vu ' + item.passes.filter((x) => x.done.v).length + ' fois' : 'Vu') : 'Pas vu';
+}
+// … et « 2 / 10 vus » (où tu en es), affiché à droite
+function countText(item) {
+  const sh = shape(item); const p = progress(item);
+  if (sh === 'episodes') {
+    if (item.type === 'catch') return '';
+    const nx = nextUnit(item); return nx && nx.season ? epCountDone(item, nx.season) + ' / ' + nx.season.count + ' vus' : '';
+  }
+  if (sh === 'tomes') return p.done + ' / ' + p.total + ' lus';
+  if (sh === 'livre') return item.volumes.length > 1 ? Math.floor(p.done) + ' / ' + p.total + ' lus' : pct(item) + ' %';
+  return '';
 }
 function nextUnit(item) {
   const pass = curPass(item); const sh = shape(item);
@@ -385,7 +416,12 @@ function matchSee(m, mode) {
     team: m.team || null, sport: m.sport, xp: mode === 'resume' ? XP.matchResume : XP.match, legacy: false, rewatch: false, rt: m.sport === 'nba' ? 150 : 110 });
 }
 function matchUnsee(m) { m.seen = null; state.events = state.events.filter((e) => e.item !== 'm:' + m.id); }
-function favTeamSide(m) { const t = TEAMS[m.team]; if (!t) return null; return m.homeId === t.id || (m.home || '').includes(t.short) ? 'home' : 'away'; }
+function favTeamSide(m) {
+  const t = TEAMS[m.team]; if (!t) return null;
+  if (String(m.homeId || '') === t.id) return 'home';
+  if (String(m.awayId || '') === t.id) return 'away';
+  return (m.home || '').includes(t.short) && !/inter/i.test(m.home || '') ? 'home' : 'away';
+}
 function pendingMatches() {
   const t = now();
   return Object.values(state.matches).filter((m) => m.team && !m.seen && !m.dismissed && m.ts < t - 2 * 3600000 && m.ts > t - 4 * DAY).sort((a, b) => b.ts - a.ts);
@@ -673,7 +709,10 @@ async function loadSeason(item, n) {
     s.eps = (d.episodes || []).map((e) => ({ t: e.name, still: e.still_path ? IMG.still + e.still_path : '', rt: e.runtime || 0, air: e.air_date || '' }));
     if (s.eps.length > s.count) s.count = s.eps.length;
     save(); render();
-  } catch (e) { seasonLoading[k] = 'fail'; }
+  } catch (e) {
+    // échec (hors connexion, limite…) : on réessaiera dans une minute au lieu de jamais
+    seasonLoading[k] = 'fail'; setTimeout(() => { if (seasonLoading[k] === 'fail') delete seasonLoading[k]; }, 60000);
+  }
 }
 /* Anciens anime ajoutés via AniList (une seule liste d'épisodes) : on peut les relier à TMDB
    pour avoir les saisons, les titres français et les miniatures, sans perdre ce qui est coché */
@@ -760,6 +799,7 @@ async function syncSport(force) {
       } catch (e) { /* hors ligne ou limite atteinte */ }
     }
   }
+  if (ok) state.sportOk = now();
   save();
   if (ok && ['encours', 'biblio', 'match'].includes(ui.route)) render();
   syncLogos().catch(() => {});
@@ -837,7 +877,13 @@ function nbaSee(f, mode) {
   if (!m.seen) matchSee(m, mode);
 }
 /* Logos d'équipes : récupérés une seule fois via TheSportsDB, puis gardés sur le téléphone */
-async function syncLogos() {
+let logosRun = null;
+function syncLogos() {
+  // une seule récupération à la fois (le sport et la NBA la lançaient en parallèle)
+  if (!logosRun) logosRun = syncLogosNow().finally(() => { logosRun = null; });
+  return logosRun;
+}
+async function syncLogosNow() {
   state.logos = state.logos || {}; state.logoTry = state.logoTry || {};
   const ids = new Set(Object.values(TEAMS).map((t) => t.id));
   Object.values(state.matches).forEach((m) => { if (m.ext) { if (m.homeId) ids.add(String(m.homeId)); if (m.awayId) ids.add(String(m.awayId)); } });
@@ -858,8 +904,9 @@ async function syncLogos() {
   if (got && ['encours', 'biblio', 'match', 'histo'].includes(ui.route)) render();
 }
 function upsertMatch(ev, t) {
+  if (!ev || !ev.idEvent) return;
   const id = 'tsdb' + ev.idEvent;
-  const ts = tsdbTs(ev);
+  const ts = tsdbTs(ev); if (isNaN(ts)) return;
   const m = state.matches[id] || { id, seen: null, dismissed: false };
   Object.assign(m, { ext: true, team: t.key, sport: t.sport, league: ev.strLeague || t.league, home: ev.strHomeTeam, away: ev.strAwayTeam,
     homeId: ev.idHomeTeam, awayId: ev.idAwayTeam, ts,
@@ -906,7 +953,8 @@ const CAT = {
 const FILTERS = [['tout', 'Tout'], ['serie', 'Séries'], ['film', 'Films'], ['doc', 'Docus'], ['livre', 'Livres'], ['mangabd', 'Manga, BD', 'volume'], ['jeu', 'Jeux'], ['sport', 'Sport'], ['catch', 'Catch']];
 const typeIn = (f, type) => f === 'tout' || f === type || (f === 'mangabd' && (type === 'manga' || type === 'bd'));
 const catIcon = (type) => (CAT[type] || CAT.serie)[0];
-function catBadge(type) { const c = CAT[type] || CAT.serie; return `<span class="cat">${svgIcon(c[0], 13)}${c[1]}</span>`; }
+// iconOnly : pictogramme seul dans un carré (grande carte, petites cartes « En ce moment »)
+function catBadge(type, iconOnly) { const c = CAT[type] || CAT.serie; return iconOnly ? `<span class="cat ico" role="img" aria-label="${c[1]}">${svgIcon(c[0], 14)}</span>` : `<span class="cat">${svgIcon(c[0], 13)}${c[1]}</span>`; }
 function chipsHtml(list, on, action, label) {
   return `<div class="chips" role="group" aria-label="${label || 'Catégorie'}">${list.map(([k, l, ic]) => {
     const icon = ic || (CAT[k] && CAT[k][0]);
@@ -947,6 +995,53 @@ async function imageToDataUrl(file, maxW, maxH) {
     c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
     return c.toDataURL('image/jpeg', 0.82);
   } finally { URL.revokeObjectURL(url); }
+}
+/* Recadrage de la photo de profil : on fait glisser la photo dans le cercle, on zoome au curseur ou en pinçant.
+   Le résultat fait 256 × 256 ; l'original (réduit à 1024 px) est gardé pour pouvoir recadrer plus tard. */
+const CROP_S = 260;
+async function openCrop(form, src) {
+  const host = form && form.querySelector('.crop-host'); if (!host) return;
+  let img; try { img = await loadImage(src); } catch (e) { toast('Image illisible.', '', 2600); return; }
+  const w = img.naturalWidth, h = img.naturalHeight, base = CROP_S / Math.min(w, h);
+  const st = { zoom: 1, scale: base, ox: (CROP_S - w * base) / 2, oy: (CROP_S - h * base) / 2 };
+  host.innerHTML = `<div class="crop"><div class="crop-stage"><canvas width="${CROP_S * 2}" height="${CROP_S * 2}"></canvas><span class="crop-mask" aria-hidden="true"></span></div>
+    <label class="crop-zoom">${svgIcon('image', 16)}<span class="sr">Zoom</span><input type="range" min="1" max="4" step="0.01" value="1">${svgIcon('image', 22)}</label>
+    <span class="small muted" style="text-align:center">Fais glisser la photo pour la placer dans le cercle. Pince ou utilise le curseur pour zoomer.</span>
+    <div class="grid2"><button type="button" class="btn" data-crop="cancel">Annuler</button><button type="button" class="btn prim" data-crop="ok">Valider</button></div></div>`;
+  form.classList.add('cropping');
+  const cv = host.querySelector('canvas'); const ctx = cv.getContext('2d'); const range = host.querySelector('input[type=range]');
+  const clampPos = () => { const dw = w * st.scale, dh = h * st.scale; st.ox = clamp(st.ox, CROP_S - dw, 0); st.oy = clamp(st.oy, CROP_S - dh, 0); };
+  const draw = () => { ctx.setTransform(2, 0, 0, 2, 0, 0); ctx.fillStyle = '#0A0D11'; ctx.fillRect(0, 0, CROP_S, CROP_S); ctx.drawImage(img, st.ox, st.oy, w * st.scale, h * st.scale); };
+  // zoom autour d'un point (centre du cercle, ou milieu des deux doigts)
+  const setZoom = (z, px, py) => {
+    z = clamp(z, 1, 4); px = px == null ? CROP_S / 2 : px; py = py == null ? CROP_S / 2 : py;
+    const ix = (px - st.ox) / st.scale, iy = (py - st.oy) / st.scale;
+    st.zoom = z; st.scale = base * z; st.ox = px - ix * st.scale; st.oy = py - iy * st.scale; clampPos(); range.value = String(z); draw();
+  };
+  const stage = host.querySelector('.crop-stage'); const pts = new Map(); let pinch = null;
+  const local = (e) => { const r = stage.getBoundingClientRect(); const k = CROP_S / r.width; return [(e.clientX - r.left) * k, (e.clientY - r.top) * k]; };
+  stage.addEventListener('pointerdown', (e) => { stage.setPointerCapture(e.pointerId); pts.set(e.pointerId, local(e)); if (pts.size === 2) { const [a, b] = [...pts.values()]; pinch = { d: Math.hypot(a[0] - b[0], a[1] - b[1]), z: st.zoom }; } });
+  stage.addEventListener('pointermove', (e) => {
+    if (!pts.has(e.pointerId)) return; const p = local(e); const prev = pts.get(e.pointerId); pts.set(e.pointerId, p);
+    if (pts.size === 2 && pinch) { const [a, b] = [...pts.values()]; setZoom(pinch.z * Math.hypot(a[0] - b[0], a[1] - b[1]) / pinch.d, (a[0] + b[0]) / 2, (a[1] + b[1]) / 2); }
+    else if (pts.size === 1) { st.ox += p[0] - prev[0]; st.oy += p[1] - prev[1]; clampPos(); draw(); }
+  });
+  const up = (e) => { pts.delete(e.pointerId); if (pts.size < 2) pinch = null; };
+  stage.addEventListener('pointerup', up); stage.addEventListener('pointercancel', up);
+  stage.addEventListener('wheel', (e) => { e.preventDefault(); const p = local(e); setZoom(st.zoom * (e.deltaY < 0 ? 1.1 : 0.9), p[0], p[1]); }, { passive: false });
+  range.addEventListener('input', () => setZoom(+range.value));
+  const close = () => { host.innerHTML = ''; form.classList.remove('cropping'); };
+  host.querySelector('[data-crop="cancel"]').addEventListener('click', close);
+  host.querySelector('[data-crop="ok"]').addEventListener('click', () => {
+    const out = document.createElement('canvas'); out.width = out.height = 256;
+    out.getContext('2d').drawImage(img, -st.ox / st.scale, -st.oy / st.scale, CROP_S / st.scale, CROP_S / st.scale, 0, 0, 256, 256);
+    const data = out.toDataURL('image/jpeg', 0.86);
+    form.elements.avatarData.value = data; form.elements.avatarSrcData.value = src;
+    const pv = form.querySelector('[data-preview="avatar"]'); if (pv) pv.innerHTML = `<img src="${data}" alt="">`;
+    const rc = form.querySelector('[data-a="avatar-recrop"]'); if (rc) rc.hidden = false;
+    close();
+  });
+  draw();
 }
 /* Lueur de la carte principale : couleur dominante de l'image (miniature 24×24),
    en ignorant les quasi-noirs, quasi-blancs et gris ; repli sur le bleu si l'image est illisible */
@@ -1000,9 +1095,19 @@ function importPack(data) {
   });
   save(); render(); return n;
 }
-function toast(html, kind, ms) {
-  const box = document.getElementById('toasts'); if (!box) return;
-  const el = document.createElement('div'); el.className = 'toast ' + (kind || ''); el.innerHTML = html; box.appendChild(el);
+// action facultative { label, fn } : bouton dans le message (ex. « Annuler »)
+function toast(html, kind, ms, action) {
+  // les messages avec « Annuler » s'affichent en bas, au-dessus des onglets (à portée de pouce)
+  let box = document.getElementById(action ? 'toasts-act' : 'toasts');
+  if (!box && action) { box = document.createElement('div'); box.id = 'toasts-act'; box.setAttribute('aria-live', 'polite'); document.body.appendChild(box); }
+  if (!box) return;
+  const el = document.createElement('div'); el.className = 'toast ' + (kind || '') + (action ? ' has-act' : ''); el.innerHTML = html;
+  if (action) {
+    box.querySelectorAll('.toast.has-act').forEach((t) => t.remove()); // un seul « Annuler » à la fois : le plus récent
+    const b = document.createElement('button'); b.type = 'button'; b.className = 'toast-act'; b.textContent = action.label;
+    b.addEventListener('click', () => { el.remove(); action.fn(); }, { once: true }); el.appendChild(b);
+  }
+  box.appendChild(el);
   setTimeout(() => { el.classList.add('out'); setTimeout(() => el.remove(), 320); }, ms || 2400);
 }
 function errText(e) {
@@ -1036,10 +1141,17 @@ function navHtml(active, plusHref) {
   return `<nav class="nav" aria-label="Navigation principale">${TABS.slice(0, 2).map(tab).join('')}<span class="plus-slot">${plus}</span>${TABS.slice(2).map(tab).join('')}</nav>`;
 }
 const CROWN = '<svg width="18" height="14" viewBox="0 0 18 14" aria-hidden="true"><path d="M1 3.5l4 3.5 4-6 4 6 4-3.5-1.6 9H2.6z" fill="currentColor"/></svg>';
+// visage de l'avatar : ta photo, sinon l'initiale de ton pseudo, sinon le pictogramme
+function faceInner(size) {
+  const s = state.settings;
+  if (s.avatar) return `<img src="${esc(s.avatar)}" alt="">`;
+  if (s.pseudo) return `<span class="initial" style="font-size:${Math.round(size * 0.95)}px">${esc(s.pseudo.trim()[0].toUpperCase())}</span>`;
+  return svgIcon('user', size);
+}
 function avatarHtml() {
-  const L = levelInfo();
-  return `<a class="avatar" href="#profil" aria-label="Profil · niveau ${L.lvl}, ${L.into} XP sur ${L.need}"><span class="lv"><b>${CROWN}NIV. ${L.lvl}</b><small>${fmtNum(L.into)} / ${fmtNum(L.need)} XP</small></span>
-    <span class="ring">${ringSvg(46, 3.5, L.pct, 'rga')}<span class="face">${svgIcon('user', 18)}</span></span></a>`;
+  const L = levelInfo(); const who = state.settings.pseudo ? esc(state.settings.pseudo) + ' · ' : '';
+  return `<a class="avatar" href="#profil" aria-label="Profil · ${who}niveau ${L.lvl}, ${L.into} XP sur ${L.need}"><span class="lv"><b>${CROWN}Niv. ${L.lvl}</b><small>${fmtNum(L.into)} / ${fmtNum(L.need)} XP</small></span>
+    <span class="ring">${ringSvg(46, 3.5, L.pct, 'rga')}<span class="face">${faceInner(18)}</span></span></a>`;
 }
 function head(title, right) {
   return `<header class="head"><h1 class="h1">${title}</h1>${right == null ? avatarHtml() : right}</header>${demoBanner()}`;
@@ -1052,10 +1164,8 @@ function page(body, active, plusHref, cls) { return `<main class="view${cls ? ' 
 
 /* ---------- cartes d'œuvres ---------- */
 function shortProgress(it) {
-  const sh = shape(it); const nx = nextUnit(it);
-  if (sh === 'episodes' && nx) return (it.seasons.length > 1 ? 'S' + nx.s + ' · ' : '') + 'Ép. ' + nx.e;
-  if (sh === 'tomes' && nx) return 'Tome ' + nx.n + ' / ' + it.volumes.length;
-  if (sh === 'livre') return 'Lecture · ' + pct(it) + ' %';
+  const sh = shape(it);
+  if (sh === 'livre') return 'Lu à ' + pct(it) + ' %';
   return progressText(it);
 }
 function envieMeta(it) {
@@ -1064,21 +1174,53 @@ function envieMeta(it) {
   if (it.runtime) return fmtRt(it.runtime);
   return it.year || TYPES[it.type].label;
 }
+// opts : short (petites cartes), extra (boutons), noCat (filtre déjà sur une catégorie : l'étiquette est inutile), menu (bouton ⋯ sur l'affiche)
 function mcard(it, opts) {
   opts = opts || {};
   const done = it.status === 'termine';
   const meta = it.status === 'envie' ? envieMeta(it) : opts.short ? shortProgress(it) : progressText(it);
-  return `<div class="mcard" data-title="${esc(it.title.toLowerCase())}"><a class="im" href="#item-${it.id}">${posterHtml(it.title, it.backdrop || it.poster, '')}${catBadge(it.type)}<span class="tt">${esc(it.title)}</span></a>
+  const more = opts.menu ? `<button class="mc-more" data-a="${opts.menu}" data-id="${it.id}" aria-label="Plus d’options pour ${esc(it.title)}"><span>${svgIcon('dots', 18)}</span></button>` : '';
+  return `<div class="mcard" data-title="${esc(it.title.toLowerCase())}"><a class="im" href="#item-${it.id}">${posterHtml(it.title, it.backdrop || it.poster, '')}${opts.noCat ? '' : catBadge(it.type, opts.short)}<span class="tt">${esc(it.title)}</span></a>${more}
     <div class="bd"><span class="meta">${done ? svgIcon('check', 15) : ''}${esc(meta)}</span>${it.status === 'encours' ? bar(curPct(it)) : ''}${opts.extra || ''}</div></div>`;
 }
-// libellé du bouton principal : ce que l'on coche en le touchant
+/* Bouton principal à la première personne : ce que tu déclares en le touchant.
+   Rond vide au repos (comme les épisodes de la fiche) ; la coche n'apparaît qu'une fois l'action faite. */
+const RING = '<svg class="ring-ic" aria-hidden="true" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="12" cy="12" r="9"/></svg>';
+const RING_DONE = '<svg class="ring-ic done" aria-hidden="true" width="22" height="22" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10.5" fill="currentColor"/><path d="M7.4 12.4l3.1 3.1 6.1-6.6" stroke="#7FB2FF" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const ARROW = '<svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>';
 function doneLabel(it, nx) {
-  const sh = shape(it);
-  if (sh === 'episodes') return (it.type === 'catch' ? 'Show ' : (it.seasons.length > 1 ? 'S' + nx.s + ' · ' : '') + 'Épisode ') + nx.e + ' vu';
+  const sh = shape(it); const one = it.volumes && it.volumes.length === 1;
+  if (sh === 'episodes') return it.type === 'catch' ? 'J’ai vu le show' : 'J’ai vu l’ép. ' + nx.e;
+  if (sh === 'tomes') return 'J’ai lu le tome ' + nx.n;
+  if (sh === 'livre') return nx.mid ? (one ? 'J’ai lu la moitié' : 'J’ai lu la moitié du tome ' + nx.n) : one ? 'J’ai fini le livre' : 'J’ai fini le tome ' + nx.n;
+  if (sh === 'jeu') return 'J’ai fini le jeu';
+  return curPass(it).done.v ? 'Je l’ai revu' : 'J’ai vu le film';
+}
+// confirmation courte (bouton pendant ~1 s, message « Annuler »)
+function doneShort(it, nx, long) {
+  const sh = shape(it); const one = it.volumes && it.volumes.length === 1;
+  if (sh === 'episodes') return it.type === 'catch' ? 'Show vu' : (it.seasons.length > 1 ? 'S' + nx.s + ' · ' : '') + (long ? 'Épisode ' : 'Ép. ') + nx.e + ' vu';
   if (sh === 'tomes') return 'Tome ' + nx.n + ' lu';
-  if (sh === 'livre') return nx.mid ? 'Moitié lue' : it.volumes.length > 1 ? 'Tome ' + nx.n + ' fini' : 'Livre fini';
+  if (sh === 'livre') return nx.mid ? 'Moitié lue' : one ? 'Livre fini' : 'Tome ' + nx.n + ' fini';
   if (sh === 'jeu') return 'Jeu terminé';
-  return curPass(it).done.v ? 'Je l’ai revu' : 'Film vu';
+  return curPass(it).done.v ? 'Film revu' : 'Film vu';
+}
+// Envies : un verbe par univers
+function envieVerb(it) {
+  if (it.type === 'film') return { label: 'J’ai vu le film', icon: RING, a: 'envie-seen' };
+  if (it.type === 'livre' || it.type === 'manga' || it.type === 'bd') return { label: 'Je lis', icon: ARROW, a: 'envie-start' };
+  if (it.type === 'jeu') return { label: 'Je joue', icon: ARROW, a: 'envie-start' };
+  return { label: 'Je regarde', icon: ARROW, a: 'envie-start' };
+}
+const TYPE_OF = { serie: ['cette série', 'la série'], film: ['ce film', 'le film'], doc: ['ce docu', 'le docu'], livre: ['ce livre', 'le livre'], bd: ['cette BD', 'la BD'], manga: ['ce manga', 'le manga'], jeu: ['ce jeu', 'le jeu'], catch: ['ce show', 'le show'] };
+const MODE_PHRASE = { direct: 'en direct', differe: 'en différé', resume: 'en résumé' };
+const modeCap = (k) => { const s = MODE_PHRASE[k] || ''; return s ? s[0].toUpperCase() + s.slice(1) : ''; };
+// bouton principal (En cours et fiche) ; pendant ~1 s après l'appui, il montre la confirmation et l'XP gagnée
+function mainBtn(it, nx, cls) {
+  const jd = ui.justDone && ui.justDone.id === it.id ? ui.justDone : null;
+  if (jd) return `<button class="btn prim is-done ${cls || ''}" type="button" tabindex="-1" aria-live="polite">${RING_DONE}<span>${esc(jd.label)}</span>${jd.xp > 0 ? `<span class="xp-chip">+${jd.xp} XP</span>` : ''}</button>`;
+  if (!nx) return '';
+  return `<button class="btn prim ${cls || ''}" data-a="next" data-id="${it.id}">${RING}<span>${esc(doneLabel(it, nx))}</span></button>`;
 }
 function fmtRt(m) { m = Math.round(m || 0); if (!m) return ''; return m >= 60 ? Math.floor(m / 60) + ' h ' + pad2(m % 60) : m + ' min'; }
 function isToday(ts) { const a = new Date(ts), b = new Date(); return a.toDateString() === b.toDateString(); }
@@ -1128,12 +1270,14 @@ function viewEncours() {
     const jd = ui.justDone && ui.justDone.id === top.id ? ui.justDone : null;
     const topBar = jd ? `<div class="bar thick bar-anim" role="img" aria-label="${curPct(top)} %" style="--from:${jd.from}%"><i style="width:${curPct(top)}%"></i></div>` : bar(curPct(top), 'thick');
     const sub = nx && sh === 'episodes' ? [named ? '« ' + nx.title + ' »' : '', fmtRt(nx.rt || top.runtime)].filter(Boolean).join(' · ') : '';
+    const ptext = progressText(top); const ctext = countText(top);
+    const lead = ptext.startsWith('Prochain : ') ? `Prochain : <b>${esc(ptext.slice(11))}</b>` : esc(ptext);
     h += `<div class="hero-wrap"${glow ? ` style="--glow:${glow}"` : ''}><section class="hero${glow ? ' tinted' : ''}${jd ? ' just' : ''}" aria-label="${esc(top.title)}, en cours">
-      <a class="img" href="#item-${top.id}" aria-label="Ouvrir la fiche de ${esc(top.title)}" style="background:${grad(top.title)}">${img ? `<img src="${esc(img)}" alt="" loading="lazy">` : ''}${catBadge(top.type)}<h2 class="tt">${esc(top.title)}</h2></a>
-      <div class="body"><div class="col" style="gap:3px"><div class="line"><span>${esc(progressText(top))}</span><span>${curPct(top)} %</span></div>${sub ? `<span class="sub">${esc(sub)}</span>` : ''}</div>
+      <a class="img" href="#item-${top.id}" aria-label="Ouvrir la fiche de ${esc(top.title)}" style="background:${grad(top.title)}">${img ? `<img src="${esc(img)}" alt="" fetchpriority="high">` : ''}${catBadge(top.type, true)}<h2 class="tt">${esc(top.title)}</h2></a>
+      <div class="body"><div class="col" style="gap:3px"><div class="line"><span>${lead}</span>${ctext ? `<span class="cnt">${esc(ctext)}</span>` : ''}</div>${sub ? `<span class="sub">${esc(sub)}</span>` : ''}</div>
         ${topBar}
         ${top.catchup ? `<span class="label amber">Mode rattrapage actif · sans XP</span>` : ''}
-        <div class="acts">${nx ? `<button class="btn prim" data-a="next" data-id="${top.id}">${svgIcon('check', 22)}${esc(doneLabel(top, nx))}</button>` : `<a class="btn prim" href="#item-${top.id}">Voir la fiche</a>`}
+        <div class="acts">${nx || jd ? mainBtn(top, nx) : `<a class="btn prim" href="#item-${top.id}">Voir la fiche</a>`}
           ${sh === 'episodes' || sh === 'tomes' || sh === 'livre' ? `<a class="sq" href="#item-${top.id}" aria-label="Voir ${sh === 'episodes' ? 'les épisodes' : 'les tomes'}">${svgIcon('list', 24)}</a>` : ''}</div>
       </div></section></div>`;
     if (items.length > 1) h += `<section class="section" aria-label="En ce moment">${secHead('En ce moment', '#biblio')}<div class="mrow">${items.slice(1, 10).map((it) => mcard(it, { short: true })).join('')}</div></section>`;
@@ -1141,13 +1285,14 @@ function viewEncours() {
     h += `<div class="empty">Rien en cours pour l’instant.<br><a href="#envies">Pioche dans tes envies</a> ou ajoute quelque chose avec +.</div>`;
   }
   if (pend.length || pshows.length) {
-    h += `<section class="section" aria-label="À confirmer">${secHead('Tu l’as vu ?')}<div class="list">${pend.map((m) => `<div class="lrow"><a href="#match-${m.id}" class="lrow-link">${matchThumb(m)}<div class="tx"><span class="tag ac">${esc(fmtDay(m.ts))} · ${esc(m.league || '')}</span><b>${esc(m.home)} – ${esc(m.away)}</b></div></a><button class="go" data-a="match-confirm" data-id="${m.id}">Vu ?</button></div>`).join('')}
-      ${pshows.map((x) => `<div class="lrow"><button data-a="show-open" data-id="${x.id}" class="lrow-link">${posterHtml(x.name, x.poster, 'th')}<div class="tx"><span class="tag ac">${esc(fmtDay(x.ts))} · ${esc(x.fed)}</span><b>${esc(x.name)}</b></div></button><button class="go" data-a="show-confirm" data-id="${x.id}">Vu ?</button></div>`).join('')}</div></section>`;
+    h += `<section class="section" aria-label="À confirmer">${secHead('Tu l’as vu ?')}<div class="list">${pend.map((m) => `<div class="lrow"><a href="#match-${m.id}" class="lrow-link">${matchThumb(m)}<div class="tx"><span class="tag ac">${esc(fmtDay(m.ts))} · ${esc(m.league || '')}</span><b>${esc(m.home)} – ${esc(m.away)}</b></div></a><button class="go" data-a="match-confirm" data-id="${m.id}">J’ai regardé</button></div>`).join('')}
+      ${pshows.map((x) => `<div class="lrow"><button data-a="show-open" data-id="${x.id}" class="lrow-link">${posterHtml(x.name, x.poster, 'th')}<div class="tx"><span class="tag ac">${esc(fmtDay(x.ts))} · ${esc(x.fed)}</span><b>${esc(x.name)}</b></div></button><button class="go" data-a="show-confirm" data-id="${x.id}">J’ai regardé</button></div>`).join('')}</div></section>`;
   }
   if (upcoming.length) {
     h += `<section class="section" aria-label="À venir"><div class="sec-head"><h2 class="h2">À venir</h2><button class="link" data-a="goto-catch">Voir tout${svgIcon('chevR', 15)}</button></div><div class="mgrid">${upcoming.map((x) => {
       const live = isToday(x.ts); const t = new Date(x.ts);
-      return `<button class="ev" data-a="show-open" data-id="${x.id}">${posterHtml(x.name, x.poster, '')}<div class="bd"><span class="date${live ? ' live' : ''}">${live ? 'Ce soir' : esc(t.toLocaleDateString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short' }).replace(/\.$/, ''))}</span><span class="nm">${esc(x.name)}</span><span class="sb">${pad2(t.getHours())}:${pad2(t.getMinutes())} · ${esc(x.fed)}</span></div></button>`;
+      const po = x.poster ? `<img class="blur" src="${esc(x.poster)}" alt="" loading="lazy"><img class="main" src="${esc(x.poster)}" alt="" loading="lazy">` : '';
+      return `<button class="ev" data-a="show-open" data-id="${x.id}"><div class="poster" style="background:${grad(x.name)}" aria-hidden="true"><span class="ph">${esc(initials(x.name))}</span>${po}</div><div class="bd"><span class="date${live ? ' live' : ''}">${live ? 'Ce soir' : esc(t.toLocaleDateString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short' }).replace(/\.$/, ''))}${live ? '' : `<span class="until">· ${esc(untilText(x.ts).toLowerCase())}</span>`}</span><span class="nm">${esc(x.name)}</span><span class="sb">${pad2(t.getHours())}:${pad2(t.getMinutes())} · ${esc(x.fed)}</span></div></button>`;
     }).join('')}</div></section>`;
   }
   return page(h, 'encours');
@@ -1163,8 +1308,38 @@ function viewBiblio() {
     <label class="search"><span class="sr">Filtrer</span>${svgIcon('search', 18)}<input class="input" type="search" placeholder="Filtrer ma bibliothèque" data-filter="bib"></label>`;
   const list = Object.values(state.items).filter((i) => i.status !== 'envie' && i.type !== 'catch' && typeIn(f.type, i.type) && (f.status === 'tous' || i.status === f.status))
     .sort((a, b) => b.updatedAt - a.updatedAt);
-  h += list.length ? `<div class="mgrid">${list.map((it) => mcard(it)).join('')}</div>` : `<div class="empty">Rien ici pour l’instant.${f.type === 'tout' && f.status === 'tous' ? '' : ' Change de filtre ou ajoute quelque chose avec +.'}</div>`;
+  if (list.length) h += `<div class="mgrid">${list.map((it) => mcard(it, { noCat: f.type !== 'tout' })).join('')}</div>${searchEmptySlot(f.type, 'encours')}`;
+  else {
+    const hasEnvies = Object.values(state.items).some((i) => i.status === 'envie' && typeIn(f.type, i.type));
+    const link = hasEnvies ? `<a class="link" href="#envies" data-a="goto-envies" data-v="${f.type}">Ou pioche dans tes envies</a>` : '';
+    if (f.status === 'termine') h += emptyState('check', 'Rien de terminé pour l’instant', 'Quand tu finiras une série, un livre ou un jeu, il viendra se ranger ici.', `<button class="btn ghost-ac" data-a="bib-status" data-v="encours">Voir ce que tu as en cours</button>`);
+    else if (f.status === 'encours') h += emptyState('play', 'Rien en cours ici', 'Passe une envie en cours, ou ajoute ce que tu as commencé.', emptyBtns(f.type === 'tout' ? EMPTY.tout[3] : EMPTY[f.type][3], 'encours'), link);
+    else { const e = EMPTY[f.type] || EMPTY.tout; h += emptyState(e[0], e[1], e[2], emptyBtns(e[3], 'encours'), link); }
+  }
   return page(h, 'biblio');
+}
+/* États vides : un pictogramme, une phrase et une action directe, par catégorie */
+const EMPTY = {
+  tout: ['biblio', 'Ta bibliothèque est vide', 'Ajoute ce que tu regardes, lis ou joues : tout viendra se ranger ici.', [['menu', 'Ajouter une œuvre']]],
+  serie: ['tv', 'Aucune série pour l’instant', 'Quelle série regardes-tu en ce moment ? Ajoute-la et reprends là où tu en es.', [['serie', 'Ajouter une série']]],
+  film: ['reel', 'La salle est encore vide', 'Commence par le dernier film que tu as vu, ou celui qui t’attend ce week-end.', [['film', 'Ajouter un film']]],
+  doc: ['cam', 'Pas encore de documentaire', 'Un docu qui t’a appris quelque chose, ou retourné ? Garde-en la trace ici.', [['doc', 'Ajouter un docu']]],
+  livre: ['bookOpen', 'Ta bibliothèque attend sa première histoire', 'Ajoute le livre que tu lis en ce moment : tu suivras tes pages au fil de la lecture.', [['livre', 'Ajouter mon premier livre']]],
+  mangabd: ['volume', 'L’étagère n’a pas encore de tome', 'Ajoute une série manga ou BD, puis coche chaque tome lu.', [['manga', 'Ajouter un manga'], ['bd', 'Une BD']]],
+  jeu: ['game', 'Quel jeu t’a fait veiller trop tard ?', 'Ajoute-le, et marque-le terminé le jour où tu verras le générique.', [['jeu', 'Ajouter un jeu']]],
+  envies: ['star', 'Ta liste d’envies est vide', 'Une série qu’on t’a conseillée, un film pour un soir de pluie ? Garde-les ici pour plus tard.', [['menu', 'Ajouter une envie']]]
+};
+function emptyBtns(list, status) {
+  return `<div class="row" style="gap:10px;flex-wrap:wrap;justify-content:center">${list.map(([t, l], i) => `<button class="btn ${i ? 'ghost-ac' : 'prim'}" data-a="empty-add" data-v="${t}" data-st="${status}">${i ? '' : svgIcon('plus', 18)}${esc(l)}</button>`).join('')}</div>`;
+}
+function emptyState(icon, title, text, actions, extra) {
+  return `<section class="empty-state" aria-label="${esc(title)}"><span class="es-ic">${svgIcon(icon, 40)}</span><h2 class="es-ti">${esc(title)}</h2><p class="es-tx">${esc(text)}</p>${actions || ''}${extra || ''}</section>`;
+}
+// recherche locale sans résultat : rempli à la volée par le filtre (voir l'écouteur « input »)
+function searchEmptySlot(type, status) { return `<div class="es-search" hidden data-type="${esc(type)}" data-st="${status}"></div>`; }
+function searchEmptyHtml(q, type, status) {
+  return emptyState('search', `Rien ne correspond à « ${q} »`, status === 'envie' ? 'Pas encore dans tes envies. Tu peux le chercher pour l’ajouter.' : 'Pas encore dans ta bibliothèque. Tu peux le chercher pour l’ajouter.',
+    `<button class="btn prim" data-a="search-add" data-v="${esc(type)}" data-st="${status}" data-q="${esc(q)}">${svgIcon('search', 18)}Chercher « ${esc(q)} » pour l’ajouter</button>`);
 }
 function sportSection() {
   const all = Object.values(state.matches).sort((a, b) => b.ts - a.ts);
@@ -1172,19 +1347,27 @@ function sportSection() {
   let h = '';
   Object.values(TEAMS).forEach((t) => {
     const seen = all.filter((m) => m.team === t.key && m.seen && seasonOf(m.ts) === season).length;
-    h += `<div class="card pad row" style="gap:12px">${teamDisc(t.name, t.key, 'mini-team')}<div class="col grow" style="gap:6px"><div class="row between"><span style="font-weight:700">${esc(t.name)}</span><span class="label">${seen} / ${t.total} vus</span></div>
-      ${bar(Math.round((seen / t.total) * 100), 'thin')}<span class="small muted">${esc(t.league)} · saison ${season}</span></div></div>`;
+    const nextM = all.filter((m) => m.team === t.key && m.ts > now()).sort((a, b) => a.ts - b.ts)[0];
+    const opp = nextM ? (favTeamSide(nextM) === 'home' ? nextM.away : nextM.home) : '';
+    const oppShort = opp ? (NBA_BY[nbaAbbr(opp)] ? NBA_BY[nbaAbbr(opp)].name.split(' ').pop() : opp) : '';
+    h += `<div class="card pad row" style="gap:12px">${teamDisc(t.name, t.key, 'mini-team')}<div class="col grow" style="gap:3px"><span style="font-weight:700">${esc(t.name)}</span>
+      <span class="team-seen">${seen ? `<b>${plural(seen, 'match regardé', 'matchs regardés')}</b> cette saison` : 'Pas encore de match regardé cette saison'}</span>
+      <span class="small muted">${esc(t.league)} ${season}${nextM ? ' · prochain : ' + esc(fmtMatch(nextM.ts)) + ' contre ' + esc(oppShort) : ''}</span></div></div>`;
   });
-  h += `<div class="sec-head"><h2 class="h2">Matchs</h2><button class="link" data-a="sport-sync">${svgIcon('sync', 16)} Actualiser</button></div>`;
+  h += `<div class="sec-head"><h2 class="h2">Matchs</h2><span class="row" style="gap:6px">${state.sportOk ? `<span class="small muted">Mis à jour à ${esc(hhmm(state.sportOk))}</span>` : ''}<button class="link" data-a="sport-sync" aria-label="Actualiser les matchs">${svgIcon('sync', 16)}${state.sportOk ? '' : ' Actualiser'}</button></span></div>`;
   const list = all.filter((m) => m.ts < now() + 14 * DAY).slice(0, 40);
   if (!list.length) h += `<div class="empty">Aucun match pour l’instant. Touche « Actualiser » pour récupérer le calendrier des Sixers et du Milan, ou ajoute un match avec +.</div>`;
-  list.forEach((m) => {
-    const fut = m.ts > now();
-    const st = m.seen ? `<span class="pill ac">${esc(MODES[m.seen.mode])}</span>` : fut ? `<span class="pill">À venir</span>` : m.dismissed ? `<span class="pill">Pas vu</span>` : `<span class="pill amber">À confirmer</span>`;
-    h += `<a class="card-row" href="#match-${m.id}"><div class="col grow" style="gap:3px;padding-left:4px"><span class="label">${esc(fmtMatch(m.ts))} · ${esc(m.league || '')}</span><span class="ellipsis" style="font-weight:600">${esc(m.home)} – ${esc(m.away)}</span></div>${st}</a>`;
-  });
+  else h += `<div class="list">${list.map((m) => {
+    const fut = m.ts > now(); const side = favTeamSide(m);
+    // à droite : soit l'état du match, soit la façon dont tu l'as regardé (plus de « Direct » ambigu)
+    const st = m.seen ? `<span class="seen-tag"><span>${svgIcon('check', 16)}Regardé</span><small>${esc(MODE_PHRASE[m.seen.mode] || '')}</small></span>`
+      : fut ? `<span class="pill">À venir</span>` : m.dismissed ? `<span class="pill">Pas vu</span>` : `<span class="pill amber">Tu l’as vu ?</span>`;
+    const tm = (name, mine, id) => `<span class="tm">${teamDisc(name, mine ? m.team : null, 'tdisc', id)}<span>${esc(name)}</span></span>`;
+    return `<a class="lrow match-line" href="#match-${m.id}"><div class="tx" style="gap:5px"><span class="label">${esc(fmtMatch(m.ts))} · ${esc(m.league || '')}</span>${tm(m.home, side === 'home', m.homeId)}${tm(m.away, side === 'away', m.awayId)}</div>${st}</a>`;
+  }).join('')}</div>`;
   return h;
 }
+const hhmm = (ts) => { const d = new Date(ts); return pad2(d.getHours()) + ':' + pad2(d.getMinutes()); };
 function nbaLogo(ab, size) {
   const t = NBA_BY[ab]; const id = state.nba.ids[ab]; const logo = id && state.logos && state.logos[id];
   return `<span class="nba-logo" style="width:${size}px;height:${size}px;${logo ? '' : `background:linear-gradient(135deg,${t.c1},${t.c2})`}" aria-hidden="true">${logo ? `<img src="${esc(logo)}" alt="">` : `<b style="font-size:${Math.round(size * 0.32)}px">${ab}</b>`}</span>`;
@@ -1193,7 +1376,8 @@ function nbaSection() {
   const feed = Object.values(state.nba.feed);
   const nights = [...new Set(feed.map((f) => f.night))].sort().reverse();
   const i = clamp(ui.nbaNight || 0, 0, Math.max(0, nights.length - 1)); ui.nbaNight = i;
-  let h = `<div class="sec-head" style="margin-top:6px"><h2 class="h2">Toute la NBA</h2><button class="link" data-a="nba-sync" ${nbaRun ? 'disabled' : ''}>${svgIcon('sync', 16)} Actualiser</button></div>`;
+  const upd = state.nba.lastRun ? `<span class="small muted">Mis à jour à ${esc(hhmm(state.nba.lastRun))}</span>` : '';
+  let h = `<div class="sec-head" style="margin-top:6px"><h2 class="h2">Toute la NBA</h2><span class="row" style="gap:6px">${upd}<button class="link" data-a="nba-sync" aria-label="Actualiser la NBA" ${nbaRun ? 'disabled' : ''}>${svgIcon('sync', 16)}${upd ? '' : ' Actualiser'}</button></span></div>`;
   if (nbaRun) h += `<div class="banner info">${svgIcon('sync', 18)}<span class="grow" id="nba-prog">Récupération des matchs… ${nbaRun.done} / ${nbaRun.total} équipes</span></div>`;
   if (!nights.length) return h + `<div class="empty">${nbaRun ? 'Les matchs arrivent…' : 'Aucun match récupéré pour l’instant. Touche « Actualiser » : la récupération prend environ une minute.'}</div>`;
   const k = nights[i];
@@ -1201,11 +1385,15 @@ function nbaSection() {
   const list = feed.filter((f) => f.night === k).sort((a, b) => a.ts - b.ts);
   h += `<div class="list">${list.map((f) => {
     const m = state.matches[f.id]; const seen = m && m.seen;
-    const tm = pad2(new Date(f.ts).getHours()) + ':' + pad2(new Date(f.ts).getMinutes());
-    const score = seen && f.hs != null ? `<span class="nba-score">${f.hs} – ${f.as}</span>` : '';
-    return `<div class="lrow nba-row"><${seen ? `a href="#match-${f.id}"` : 'div'} class="nba-teams">${nbaLogo(f.h, 38)}<div class="tx"><b>${esc(NBA_BY[f.h].nick)} – ${esc(NBA_BY[f.a].nick)}</b><span>${seen ? esc(MODES[m.seen.mode]) : tm}${score ? ' · ' : ''}${score}</span></div>${nbaLogo(f.a, 38)}</${seen ? 'a' : 'div'}>
-      ${seen ? `<span class="pill ac">${svgIcon('check', 14)}Vu</span>` : `<button class="go" data-a="nba-ask" data-id="${f.id}">Vu ?</button>`}</div>`;
-  }).join('')}</div><span class="small muted" style="padding:0 6px">Scores masqués tant que tu n’as pas marqué le match comme vu.</span>`;
+    const hasScore = f.hs != null && f.as != null; const revealed = !seen && ui.reveal[f.id] && hasScore;
+    const score = hasScore ? `${f.hs} – ${f.as}` : '';
+    const line = seen ? `<span class="ac-line">${svgIcon('check', 14)}Regardé ${esc(MODE_PHRASE[m.seen.mode] || '')}${score ? ' · ' + score : ''}</span>`
+      : revealed ? `<span class="soft-line">${svgIcon('eye', 14)}${score} · score seulement</span>` : `<span>${hhmm(f.ts)}${hasScore ? ' · score masqué' : ''}</span>`;
+    const teams = `${nbaLogo(f.h, 38)}<div class="tx"><b>${esc(NBA_BY[f.h].nick)} – ${esc(NBA_BY[f.a].nick)}</b>${line}</div>${nbaLogo(f.a, 38)}`;
+    if (seen) return `<div class="lrow nba-row"><a href="#match-${f.id}" class="nba-teams">${teams}</a></div>`;
+    // deux actions séparées : déclarer qu'on a regardé, ou seulement voir le score sans rien enregistrer
+    return `<div class="lrow nba-row col-row"><div class="nba-teams">${teams}</div><div class="nba-acts"><button class="btn small sel" data-a="nba-ask" data-id="${f.id}">${RING}J’ai regardé</button>${hasScore && !revealed ? `<button class="btn small" data-a="nba-reveal" data-id="${f.id}">${svgIcon('eye', 17)}Voir le score</button>` : ''}</div></div>`;
+  }).join('')}</div><span class="small muted" style="padding:0 6px">Les scores restent cachés tant que tu ne choisis pas « J’ai regardé » ou « Voir le score ».</span>`;
   return h;
 }
 function nbaForm() {
@@ -1236,7 +1424,7 @@ function catchSection() {
   const planned = Object.values(state.shows).filter((s) => !s.seen && !s.dismissed).sort((a, b) => a.ts - b.ts);
   h += `<div class="sec-head"><h2 class="h2">À venir</h2><a class="link" href="#ajouter-catch">+ Programmer</a></div>`;
   if (!planned.length) h += `<div class="empty">Aucun show programmé. Ajoute le prochain gala ou PPV avec son affiche : il apparaîtra dans En cours le jour J.</div>`;
-  planned.forEach((s) => { h += `<button class="card-row" data-a="show-open" data-id="${s.id}">${posterHtml(s.name, s.poster, 'sm')}<div class="col grow" style="gap:3px"><span class="label">${esc(fmtMatch(s.ts))} · ${esc(s.fed)} · ${esc(CKINDS[s.kind] || 'Show')}</span><span class="ti">${esc(s.name)}</span></div><span class="pill ${s.ts < now() ? 'amber' : isToday(s.ts) ? 'live' : ''}">${s.ts < now() ? 'À confirmer' : esc(untilText(s.ts))}</span></button>`; });
+  planned.forEach((s) => { h += `<button class="card-row" data-a="show-open" data-id="${s.id}">${posterHtml(s.name, s.poster, 'sm')}<div class="col grow" style="gap:3px"><span class="label">${esc(fmtMatch(s.ts))} · ${esc(s.fed)} · ${esc(CKINDS[s.kind] || 'Show')}</span><span class="ti">${esc(s.name)}</span></div><span class="pill ${s.ts < now() ? 'amber' : isToday(s.ts) ? 'live' : ''}">${s.ts < now() ? 'Tu l’as vu ?' : esc(untilText(s.ts))}</span></button>`; });
   const log = state.catchLog.slice().sort((a, b) => b.ts - a.ts);
   const byFed = {}; log.forEach((c) => { byFed[c.fed] = (byFed[c.fed] || 0) + 1; });
   h += `<div class="sec-head"><h2 class="h2">Journal</h2><a class="link" href="#ajouter-catch">+ Ajouter</a></div>`;
@@ -1244,7 +1432,7 @@ function catchSection() {
   if (!log.length) h += `<div class="empty">Rien pour l’instant. Touche + pour ajouter un show, un PPV ou un gala.</div>`;
   log.forEach((c) => {
     h += `<div class="card-row">${c.poster ? posterHtml(c.show || c.fed, c.poster, 'sm') : teamDisc(c.fed, null, 'mini-team')}<div class="col grow" style="gap:3px"><span class="label">${esc(fmtDay(c.ts))} · ${esc(c.fed)} · ${esc(CKINDS[c.kind] || 'Hebdo')}${c.air && c.air !== isoDay(new Date(c.ts)) ? ' · diffusé le ' + esc(fmtLong(c.air)) : ''}</span>
-      <span class="ti">${esc(c.show || c.fed)}</span></div><span class="pill ac">${esc(MODES[c.mode])}</span>
+      <span class="ti">${esc(c.show || c.fed)}</span></div><span class="pill ac">${esc(modeCap(c.mode))}</span>
       <button class="icon-btn" data-a="catch-del" data-id="${c.id}" aria-label="Supprimer">${svgIcon('trash', 18)}</button></div>`;
   });
   return h;
@@ -1256,10 +1444,12 @@ function viewEnvies() {
   const all = Object.values(state.items).filter((i) => i.status === 'envie').sort((a, b) => b.createdAt - a.createdAt);
   const filters = FILTERS.filter(([k]) => k === 'tout' || all.some((i) => typeIn(k, i.type)));
   const list = all.filter((i) => typeIn(f, i.type));
-  const acts = (it) => `<div class="acts"><button class="btn prim" data-a="item-status" data-id="${it.id}" data-v="encours">${svgIcon('play', 13, true)}Commencer</button><button class="icon-btn" data-a="item-del" data-id="${it.id}" aria-label="Retirer ${esc(it.title)} des envies">${svgIcon('x', 16)}</button></div>`;
+  // un verbe par univers ; la croix (prise pour « fermer ») laisse place au menu ⋯ de l'affiche
+  const acts = (it) => { const v = envieVerb(it); return `<div class="acts"><button class="btn prim" data-a="${v.a}" data-id="${it.id}">${v.a === 'envie-seen' ? v.icon : ''}${esc(v.label)}${v.a === 'envie-seen' ? '' : v.icon}</button></div>`; };
   let h = head('Envies');
   if (all.length) h += chipsHtml(filters, f, 'env-type') + `<label class="search"><span class="sr">Rechercher</span>${svgIcon('search', 18)}<input class="input" type="search" placeholder="Rechercher dans mes envies" data-filter="bib"></label>`;
-  h += list.length ? `<div class="mgrid">${list.map((it) => mcard(it, { extra: acts(it) })).join('')}</div>` : `<div class="empty">Ta liste d’envies est vide.<br>Ajoute ce que tu veux voir, lire ou jouer avec +.</div>`;
+  if (list.length) h += `<div class="mgrid">${list.map((it) => mcard(it, { extra: acts(it), noCat: f !== 'tout', menu: 'envie-menu' })).join('')}</div>${searchEmptySlot(f, 'envie')}`;
+  else { const e = EMPTY.envies; h += emptyState(e[0], e[1], e[2], emptyBtns(e[3], 'envie')); }
   return page(h, 'envies');
 }
 
@@ -1279,11 +1469,11 @@ function histoRows(evs) {
     if (k === 'match') {
       const m = state.matches[String(e.item).slice(2)]; type = 'sport';
       title = m ? m.home + ' – ' + m.away : (e.title || 'Match'); th = m ? matchThumb(m) : posterHtml('Match', '', 'th');
-      what = (m && m.league ? m.league + ' · ' : '') + (MODES[e.mode] ? (e.mode === 'resume' ? 'Résumé' : 'Vu en ' + MODES[e.mode].toLowerCase()) : 'Vu'); href = m ? '#match-' + m.id : '';
+      what = (m && m.league ? m.league + ' · ' : '') + (MODE_PHRASE[e.mode] ? 'Regardé ' + MODE_PHRASE[e.mode] : 'Regardé'); href = m ? '#match-' + m.id : '';
     } else if (k === 'catch') {
       const c = state.catchLog.find((x) => 'c:' + x.id === e.item); type = 'catch';
       title = (c && c.show) || e.show || e.fed; th = c && c.poster ? posterHtml(title, c.poster, 'th') : fedVignette(e.fed);
-      tag = CKINDS[e.catchKind] || ''; what = e.fed + (MODES[e.mode] ? ' · ' + (e.mode === 'resume' ? 'Résumé' : 'En ' + MODES[e.mode].toLowerCase()) : '');
+      tag = CKINDS[e.catchKind] || ''; what = e.fed + (MODE_PHRASE[e.mode] ? ' · Regardé ' + MODE_PHRASE[e.mode] : '');
     } else {
       const it = state.items[e.item]; if (!it) continue;
       title = it.title; href = '#item-' + it.id; th = posterHtml(it.title, it.backdrop || it.poster, 'th'); type = it.type;
@@ -1324,10 +1514,13 @@ function viewHisto() {
   const used = FILTERS.filter(([k]) => k === 'tout' || rowsAll.some((r) => typeIn(k, r.type)));
   let h = head('Historique') + chipsHtml(used, f, 'histo-type');
   if (!groups.length) h += `<div class="empty">Rien pour l’instant.<br>Ce que tu coches apparaîtra ici, jour après jour.</div>`;
-  groups.slice(0, 14).forEach((g) => {
+  // les mois les plus anciens étaient cachés sans le dire : on les propose maintenant
+  const shown = ui.histoN || 14;
+  groups.slice(0, shown).forEach((g) => {
     h += `<section class="section"><div class="sec-head"><h2 class="h2">${esc(g.label)}</h2><span class="count">${g.rows.length}</span></div>
       <div class="list">${g.rows.map((r) => histoRowHtml(r, when(r))).join('')}</div></section>`;
   });
+  if (groups.length > shown) h += `<button class="btn block" data-a="histo-more">Voir les mois précédents</button>`;
   const year = new Date().getFullYear();
   h += `<a class="btn prim block" href="#rewind-${year}">${svgIcon('redo', 18)}Ton Rewind ${year}</a>`;
   return page(h, 'histo');
@@ -1402,8 +1595,8 @@ function viewProfil() {
   const stat = (ic, n, one, many) => `<div class="card stat">${svgIcon(ic, 22)}<b>${n}</b><span>${n > 1 ? many : one}</span></div>`;
   const h = head('Profil', `<button class="icon-btn sq" data-a="goto-settings" aria-label="Réglages">${svgIcon('gear', 21)}</button>`) + `
   <section class="card lvl-card" aria-label="Niveau ${L.lvl}, ${L.into} XP sur ${L.need}">
-    <span class="ring big">${ringSvg(120, 9, L.pct, 'rgp')}<span class="face">${svgIcon('user', 40)}</span></span>
-    <div class="col" style="gap:6px"><span class="lvl-label">${CROWN}NIVEAU ${L.lvl}</span>
+    <button class="ring big ring-btn" data-a="profile-edit" aria-label="Modifier le profil (pseudo et photo)">${ringSvg(120, 9, L.pct, 'rgp')}<span class="face">${faceInner(40)}</span><span class="face-edit" aria-hidden="true">${svgIcon('edit', 14)}</span></button>
+    <div class="col" style="gap:6px">${s.pseudo ? `<span class="pseudo">${esc(s.pseudo)}</span>` : `<button class="link" data-a="profile-edit" style="align-self:flex-start;padding:0;min-height:32px">${svgIcon('plus', 15)}Choisir un pseudo</button>`}<span class="lvl-label">${CROWN}NIVEAU ${L.lvl}</span>
       <span class="lvl-xp">${fmtNum(L.into)} <small>/ ${fmtNum(L.need)} XP</small></span>
       <span style="font-size:14px;color:var(--soft);line-height:1.4">Plus que <b style="color:var(--text)">${fmtNum(L.need - L.into)} XP</b> avant le niveau ${L.lvl + 1}.</span><span class="small muted">Total : ${fmtNum(L.xp)} XP</span></div>
   </section>
@@ -1583,20 +1776,11 @@ function showModal(s) {
   const past = s.ts < now();
   openModal(s.name, `<div class="col" style="gap:12px">${s.poster ? `<img src="${esc(s.poster)}" alt="Affiche de ${esc(s.name)}" class="show-poster">` : ''}
     <span class="label accent">${esc(s.fed)} · ${esc(CKINDS[s.kind] || 'Show')} · ${esc(fmtMatch(s.ts))}</span>
-    ${past && !s.seen ? `<div class="seg">${Object.keys(MODES).map((k) => `<button data-a="show-seen" data-id="${s.id}" data-mode="${k}">${MODES[k]}</button>`).join('')}</div>` : ''}
+    ${past && !s.seen ? `<span class="small muted">Tu l’as regardé ? Choisis comment :</span><div class="seg">${Object.keys(MODES).map((k) => `<button data-a="show-seen" data-id="${s.id}" data-mode="${k}">${modeCap(k)}</button>`).join('')}</div>` : ''}
     <div class="grid2"><button class="btn danger" data-a="show-del" data-id="${s.id}">${svgIcon('trash', 16)}Supprimer</button><button class="btn" data-a="modal-close">Fermer</button></div></div>`);
 }
 
 /* ---------- Fiche œuvre ---------- */
-function xpHint(it) {
-  if (it.catchup) return 'Rattrapage · sans XP';
-  const half = curPass(it).n > 1 ? 0.5 : 1; const sh = shape(it);
-  if (sh === 'episodes') return '+' + Math.round((XP.ep[it.type] || 10) * half) + ' XP / ' + (it.type === 'catch' ? 'show' : 'ép.');
-  if (sh === 'tomes') return '+' + Math.round(XP.tome * half) + ' XP / tome';
-  if (sh === 'jeu') return '+' + XP.jeu + ' XP';
-  if (sh === 'film') return '+' + Math.round(XP.film * (curPass(it).done.v ? 0.5 : 1)) + ' XP';
-  return '';
-}
 function viewItem(id) {
   const it = state.items[id];
   if (!it) return page(`<div class="empty">Cette œuvre n’existe plus.<br><a href="#biblio">Retour à la bibliothèque</a></div>`, '');
@@ -1608,38 +1792,34 @@ function viewItem(id) {
     sh === 'episodes' && it.type !== 'catch' ? plural(it.seasons.length, 'saison') + ' · ' + plural(total, 'épisode') : '',
     (sh === 'tomes' || sh === 'livre') && it.volumes.length > 1 ? plural(it.volumes.length, 'tome') : '',
     (sh === 'film') && it.runtime ? fmtRt(it.runtime) : ''].filter(Boolean).join(' · ');
-  let h = `<section class="fhero" aria-label="${esc(it.title)}"><div class="bg" style="background:${grad(it.title)}">${bg ? `<img src="${esc(bg)}" alt="" loading="lazy">` : ''}</div>
+  let h = `<section class="fhero" aria-label="${esc(it.title)}"><div class="bg" style="background:${grad(it.title)}">${bg ? `<img src="${esc(bg)}" alt="" fetchpriority="high">` : ''}</div>
     <div class="top"><button class="icon-btn glassy" data-a="back" aria-label="Retour">${svgIcon('back', 20)}</button><button class="icon-btn glassy" data-a="item-menu" data-id="${it.id}" aria-label="Options : statut, rattrapage, modifier">${svgIcon('dots', 22)}</button></div>
     <div class="info">${catBadge(it.type)}<h1 class="ftitle">${esc(it.title)}</h1>${meta ? `<span class="fmeta">${esc(meta)}</span>` : ''}</div></section>`;
   let b = '';
   if (it.catchup) b += `<div class="banner warn">${svgIcon('clock', 18)}<span class="grow">Mode rattrapage : tes coches ne donnent pas d’XP.</span><button class="link" data-a="catchup-set" data-id="${it.id}" data-v="0">Désactiver</button></div>`;
   if (pass.n > 1) b += `<div class="banner info">${svgIcon('redo', 18)}<span class="grow">Passage ${pass.n} (revisionnage) : moitié des XP.</span></div>`;
   // progression + action principale
-  let prog = '';
-  if (sh === 'episodes') {
-    const s = nx ? nx.season : it.seasons[it.seasons.length - 1];
-    const label = it.type === 'catch' ? progressText(it) : s ? (it.seasons.length > 1 ? 'Saison ' + s.n + ' · ' : '') + epCountDone(it, s) + ' / ' + s.count + ' épisodes' : progressText(it);
-    prog = `<div class="prog"><div class="line"><span>${esc(label)}</span><span class="xp">${esc(xpHint(it))}</span></div>${it.type === 'catch' ? '' : bar(s && s.count ? Math.round((epCountDone(it, s) / s.count) * 100) : 0)}</div>`;
-  } else if (sh === 'tomes' || sh === 'livre') {
-    prog = `<div class="prog"><div class="line"><span>${esc(progressText(it))} · ${pct(it)} %</span><span class="xp">${esc(xpHint(it))}</span></div>${bar(pct(it))}</div>`;
-  } else {
-    prog = `<div class="prog"><div class="line"><span>${esc(progressText(it))}</span><span class="xp">${esc(xpHint(it))}</span></div></div>`;
-  }
+  // progression : « Prochain : S1 · Ép. 3 » à gauche, « 2 / 10 vus » à droite ; l'XP n'apparaît qu'après validation
+  const ptext = progressText(it); const ctext = countText(it);
+  const lead = ptext.startsWith('Prochain : ') ? `Prochain : <b>${esc(ptext.slice(11))}</b>` : esc(ptext);
+  const hint = it.catchup ? `<span class="xp">Rattrapage · sans XP</span>` : ctext ? `<span class="cnt">${esc(ctext)}</span>` : '';
+  const showBar = (sh === 'episodes' && it.type !== 'catch') || sh === 'tomes' || sh === 'livre';
+  const prog = `<div class="prog"><div class="line"><span>${lead}</span>${hint}</div>${showBar ? bar(curPct(it)) : ''}${it.catchup && ctext ? `<span class="small muted">${esc(ctext)}</span>` : ''}</div>`;
   let main = '';
-  if (it.status === 'envie') main = `<button class="btn prim block big" data-a="item-status" data-id="${it.id}" data-v="encours">${svgIcon('play', 18, true)}Commencer</button>`;
-  else if (sh === 'film') main = `<button class="btn prim block big" data-a="film-seen" data-id="${it.id}">${svgIcon(pass.done.v ? 'redo' : 'check', 22)}${pass.done.v ? 'Je l’ai revu' : 'Film vu'}</button>`;
-  else if (nx) main = `<button class="btn prim block big" data-a="next" data-id="${it.id}">${svgIcon('check', 22)}${esc(doneLabel(it, nx))}</button>`;
+  if (it.status === 'envie') { const v = envieVerb(it); main = `<button class="btn prim block big" data-a="${v.a}" data-id="${it.id}">${v.a === 'envie-seen' ? v.icon : ''}${esc(v.label)}${v.a === 'envie-seen' ? '' : v.icon}</button>`; }
+  else if (nextOrRewatch(it) || (ui.justDone && ui.justDone.id === it.id)) main = mainBtn(it, nextOrRewatch(it), 'block big');
   b += `<section class="col" style="gap:14px">${prog}${main}
-    <div class="acts2"><button class="btn act" data-a="item-cover" data-id="${it.id}">${svgIcon('image', 19)}Couverture</button><button class="btn act" data-a="item-history" data-id="${it.id}">${svgIcon('clock', 19)}Historique</button></div></section>`;
-  if (it.overview) b += `<p class="overview">${esc(it.overview)}</p>`;
+    <button class="btn block act-row" data-a="item-history" data-id="${it.id}">${svgIcon('clock', 19)}Mon activité sur ${esc((TYPE_OF[it.type] || TYPE_OF.serie)[0])}</button></section>`;
+  if (it.overview) {
+    // résumé replié sur 3 lignes : celui qui veut juste cocher un épisode y arrive plus vite
+    const long = it.overview.length > 170; const open = ui.ovOpen && ui.ovOpen[it.id];
+    b += `<div class="col" style="gap:2px"><p class="overview${long && !open ? ' clamp' : ''}">${esc(it.overview)}</p>${long ? `<button class="link" data-a="ov-toggle" data-id="${it.id}" style="align-self:flex-start">${open ? 'Réduire' : 'Lire la suite'}</button>` : ''}</div>`;
+  }
   if (sh === 'episodes') b += episodesBlock(it);
   else if (sh === 'tomes') b += tomesBlock(it);
   else if (sh === 'livre') b += livreBlock(it);
   else if (sh === 'jeu') b += jeuBlock(it);
   else b += filmBlock(it);
-  if ((sh === 'episodes' || sh === 'tomes' || sh === 'livre') && progress(it).done > 0) {
-    b += `<button class="btn block" data-a="rewatch" data-id="${it.id}">${svgIcon('redo', 18)}${it.type === 'livre' || it.type === 'bd' || it.type === 'manga' ? 'Commencer une relecture' : 'Commencer un revisionnage'}</button>`;
-  }
   return page(h + `<div class="fbody">${b}</div>`, '', null, 'no-pad-top');
 }
 function episodesBlock(it) {
@@ -1745,12 +1925,12 @@ function viewMatch(id) {
         <span class="small soft">${esc(fmtMatch(m.ts))}</span></div>
       <div class="team">${teamDisc(m.away, side === 'away' ? m.team : null, '', m.awayId)}<span class="nm">${esc(m.away)}</span><span class="small muted">Extérieur</span></div></div></section>`;
   if (m.seen) {
-    h += `<section class="card pad col" style="gap:12px"><h2 class="h3">Match vu</h2><div class="badge-strip won"><span class="medal">${svgIcon('star', 15, true)}</span><b class="grow">Vu en ${esc(MODES[m.seen.mode].toLowerCase())} · +${m.seen.mode === 'resume' ? XP.matchResume : XP.match} XP</b><button class="link" data-a="match-unsee" data-id="${id}">Annuler</button></div></section>`;
+    h += `<section class="card pad col" style="gap:12px"><h2 class="h3">Match regardé</h2><div class="badge-strip won"><span class="medal">${svgIcon('star', 15, true)}</span><b class="grow">Regardé ${esc(MODE_PHRASE[m.seen.mode] || '')} · +${m.seen.mode === 'resume' ? XP.matchResume : XP.match} XP</b><button class="link" data-a="match-unsee" data-id="${id}">Annuler</button></div></section>`;
   } else if (!fut) {
-    h += `<section class="card pad col" style="gap:12px"><h2 class="h3">Tu as vu ce match ?</h2>
-      <div class="seg" role="radiogroup" aria-label="Mode de visionnage">${Object.keys(MODES).map((k) => `<button role="radio" aria-checked="${mode === k}" class="${mode === k ? 'on' : ''} tall" data-a="match-mode" data-id="${id}" data-v="${k}">${MODES[k]}<span class="label amber">+${k === 'resume' ? XP.matchResume : XP.match} XP</span></button>`).join('')}</div>
-      <button class="btn prim block" data-a="match-seen" data-id="${id}" data-mode="${mode}">${svgIcon('check', 18)}Marquer vu${hasScore ? ' et révéler' : ''}</button>
-      <div class="row between">${hasScore && !show ? `<button class="link" data-a="reveal" data-id="${id}">Révéler sans marquer</button>` : '<span></span>'}${m.dismissed ? '<span class="label">Marqué « pas vu »</span>' : `<button class="link" data-a="match-dismiss" data-id="${id}">Pas vu</button>`}</div></section>`;
+    h += `<section class="card pad col" style="gap:12px"><h2 class="h3">Tu as regardé ce match ?</h2>
+      <div class="seg" role="radiogroup" aria-label="Façon de regarder">${Object.keys(MODES).map((k) => `<button role="radio" aria-checked="${mode === k}" class="${mode === k ? 'on' : ''} tall" data-a="match-mode" data-id="${id}" data-v="${k}">${modeCap(k)}<span class="label amber">+${k === 'resume' ? XP.matchResume : XP.match} XP</span></button>`).join('')}</div>
+      <button class="btn prim block" data-a="match-seen" data-id="${id}" data-mode="${mode}">${RING}J’ai regardé ce match</button>
+      <div class="row between">${hasScore && !show ? `<button class="link" data-a="reveal" data-id="${id}">${svgIcon('eye', 16)}Voir le score</button>` : '<span></span>'}${m.dismissed ? '<span class="label">Marqué « pas vu »</span>' : `<button class="link" data-a="match-dismiss" data-id="${id}">Je ne l’ai pas vu</button>`}</div></section>`;
   }
   if (!fut) {
     h += `<section class="card pad col" style="gap:12px" aria-label="Couverture"><div class="row between"><h2 class="h2">Couverture</h2>${m.cover ? `<button class="link" data-a="match-cover" data-id="${id}">Changer</button>` : ''}</div>
@@ -1760,8 +1940,8 @@ function viewMatch(id) {
     const season = seasonOf(m.ts);
     const list = Object.values(state.matches).filter((x) => x.team === m.team && seasonOf(x.ts) === season && x.ts < now()).sort((a, b) => b.ts - a.ts);
     const seenN = list.filter((x) => x.seen).length;
-    h += `<section class="card pad col" style="gap:10px"><div class="row between"><h2 class="h2">${esc(t.short)} ${season}</h2><span class="label">${seenN} / ${t.total} vus</span></div>${bar(Math.round((seenN / t.total) * 100), 'thin')}
-      ${list.slice(0, 6).map((x) => { const sd = favTeamSide(x); const opp = sd === 'home' ? 'vs ' + x.away : '@ ' + x.home; return `<a class="mrow-line" href="#match-${x.id}"><span class="small muted" style="width:56px">${esc(fmtDay(x.ts))}</span><span class="grow ellipsis">${esc(opp)}</span><span class="pill ${x.seen ? 'ac' : ''}">${x.seen ? esc(MODES[x.seen.mode]) : 'Non vu'}</span></a>`; }).join('')}</section>`;
+    h += `<section class="card pad col" style="gap:10px"><div class="row between"><h2 class="h2">${esc(t.short)} ${season}</h2><span class="label">${plural(seenN, 'match regardé', 'matchs regardés')}</span></div>
+      ${list.slice(0, 6).map((x) => { const sd = favTeamSide(x); const opp = sd === 'home' ? 'vs ' + x.away : '@ ' + x.home; return `<a class="mrow-line" href="#match-${x.id}"><span class="small muted" style="width:56px">${esc(fmtDay(x.ts))}</span><span class="grow ellipsis">${esc(opp)}</span><span class="pill ${x.seen ? 'ac' : ''}">${x.seen ? esc(modeCap(x.seen.mode)) : 'Non vu'}</span></a>`; }).join('')}</section>`;
   }
   if (!m.ext) h += `<button class="btn danger block" data-a="match-del" data-id="${id}">${svgIcon('trash', 18)}Supprimer ce match</button>`;
   return page(h, '', null, 'no-pad-top');
@@ -1774,6 +1954,10 @@ function modalHtml() {
   if (!ui.modal) return '';
   return `<div class="modal-bg${ui.modal.sheet ? ' bottom' : ''}" data-a="modal-bg"><div class="modal${ui.modal.sheet ? ' sheet' : ''}" role="dialog" aria-modal="true" aria-label="${esc(ui.modal.title || '')}">${ui.modal.title ? `<h2 class="h3">${esc(ui.modal.title)}</h2>` : ''}${ui.modal.html}</div></div>`;
 }
+// ligne de feuille (menu ⋯) : pictogramme, libellé, explication facultative
+function sheetRow(icon, label, sub, attrs, extra, cls) {
+  return `<button class="sheet-row ${cls || ''}" ${attrs}>${svgIcon(icon, 22)}<span class="grow col" style="gap:2px"><b>${esc(label)}</b>${sub ? `<small>${esc(sub)}</small>` : ''}</span>${extra || ''}</button>`;
+}
 function openModal(title, html, extra) { ui.modal = Object.assign({ title, html }, extra || {}); render(); }
 function closeModal() { ui.modal = null; render(); }
 function confirmBox(title, text, yesLabel, onYes, danger) {
@@ -1783,43 +1967,109 @@ function confirmBox(title, text, yesLabel, onYes, danger) {
 /* =========================================================
    11. Actions
    ========================================================= */
-function withXp(fn) {
+// opts.quiet : pas de petit « +XP » (le message « Annuler » l'affiche déjà) ; renvoie l'XP gagnée
+function withXp(fn, opts) {
   const before = totalXp(); fn(); memoClear(); const gained = totalXp() - before;
   checkUnlocks(); save(); render();
-  if (gained > 0) toast(`<span class="xp-pop">+${gained} XP</span>`, '', 1600);
+  if (gained > 0 && !(opts && opts.quiet)) toast(`<span class="xp-pop">+${gained} XP</span>`, '', 1600);
+  return gained;
 }
+/* Annuler : on garde une copie de l'œuvre et de ses événements juste avant l'action */
+function snapItem(id) {
+  return { id, item: state.items[id] ? JSON.parse(JSON.stringify(state.items[id])) : null, events: state.events.filter((e) => e.item === id).map((e) => Object.assign({}, e)), unlocked: Object.assign({}, state.unlocked), lastLevel: state.lastLevel };
+}
+function restoreItem(s) {
+  if (s.item) state.items[s.id] = s.item; else delete state.items[s.id];
+  state.events = state.events.filter((e) => e.item !== s.id).concat(s.events);
+  state.unlocked = s.unlocked; state.lastLevel = s.lastLevel;
+  ui.justDone = null; memoClear(); checkUnlocks(true); save(); render();
+}
+function undoToast(text, snap, xp) {
+  toast(`<span class="grow">${esc(text)}${xp > 0 ? ` · <span class="xp-pop">+${xp} XP</span>` : ''}</span>`, '', 5000, { label: 'Annuler', fn: () => { restoreItem(snap); toast('Annulé', '', 1400); } });
+}
+const buzz = (ms) => { if (navigator.vibrate) try { navigator.vibrate(ms); } catch (e) { /* */ } };
+// film déjà vu : le bouton sert à enregistrer un revisionnage
+const nextOrRewatch = (it) => nextUnit(it) || (shape(it) === 'film' && curPass(it).done.v ? { key: 'v' } : null);
 function doNext(it) {
-  const nx = nextUnit(it); if (!nx) return;
+  const nx = nextOrRewatch(it); if (!nx) return;
   if (shape(it) === 'jeu') { askJeuDone(it); return; }
-  withXp(() => { if (shape(it) === 'film' && curPass(it).done.v) newPass(it); setDone(it, nx.key, true); touched(it); });
+  const snap = snapItem(it.id); const label = doneShort(it, nx); const long = doneShort(it, nx, true);
+  const from = curPct(it);
+  const xp = withXp(() => { if (shape(it) === 'film' && curPass(it).done.v) newPass(it); setDone(it, nx.key, true); touched(it); }, { quiet: true });
+  // pendant ~1 s : le bouton montre la confirmation (coche, « Ép. 3 vu », +10 XP), la barre avance depuis l'ancienne valeur
+  if (ui.route === 'encours' || ui.route === 'item') {
+    ui.justDone = { id: it.id, from, label, xp }; clearTimeout(ui.justT); render();
+    ui.justT = setTimeout(() => { ui.justDone = null; if (ui.route === 'encours' || ui.route === 'item') render(); }, 1000);
+    buzz(12);
+  }
+  undoToast(long, snap, xp);
 }
-function askJeuDone(it) { confirmBox('Jeu terminé ?', `Marquer <b>${esc(it.title)}</b> comme terminé ${it.catchup ? '(rattrapage, sans XP)' : `(+${XP.jeu} XP)`} ?`, 'Terminé', () => withXp(() => { setDone(it, 'fin', true); touched(it); })); }
+function askJeuDone(it) {
+  confirmBox('Jeu terminé ?', `Marquer <b>${esc(it.title)}</b> comme terminé ${it.catchup ? '(rattrapage, sans XP)' : `(+${XP.jeu} XP)`} ?`, 'J’ai fini le jeu', () => {
+    const snap = snapItem(it.id); const xp = withXp(() => { setDone(it, 'fin', true); touched(it); }, { quiet: true }); undoToast('Jeu terminé', snap, xp);
+  });
+}
+// coche groupée (appui long, « Tout cocher ») : appliquée tout de suite, avec « Annuler » pendant 5 s
+function bulk(it, fn, text) {
+  const snap = snapItem(it.id); const before = progress(it).done;
+  const xp = withXp(() => { fn(); touched(it); }, { quiet: true });
+  const n = Math.abs(progress(it).done - before);
+  undoToast(text(n), snap, xp);
+}
 function upTo(it, key) {
-  const keys = shape(it) === 'episodes' ? epKeys(it) : volKeys(it);
+  const sh = shape(it); const keys = sh === 'episodes' ? epKeys(it) : volKeys(it);
   const idx = keys.indexOf(key); if (idx < 0) return;
-  withXp(() => { keys.slice(0, idx + 1).forEach((k) => setDone(it, k, true)); touched(it); });
-  if (navigator.vibrate) try { navigator.vibrate(20); } catch (e) { /* */ }
-  toast('Coché jusqu’ici', '', 1400);
+  buzz(20);
+  bulk(it, () => keys.slice(0, idx + 1).forEach((k) => setDone(it, k, true)), (n) => (n ? plural(n, sh === 'episodes' ? 'épisode coché' : 'tome coché', sh === 'episodes' ? 'épisodes cochés' : 'tomes cochés') : 'Déjà coché') + ' jusqu’ici');
 }
 function toggleUnit(d) { const it = state.items[d.id]; const on = !curPass(it).done[d.k]; withXp(() => { setDone(it, d.k, on); touched(it); }); }
 const ACT = {
   back() { if (history.length > 1) history.back(); else location.hash = '#encours'; },
-  next(d) {
-    const it = state.items[d.id]; if (!it) return;
-    // En cours : petite animation de validation (bouton, coche, barre qui avance depuis l'ancienne valeur)
-    if (ui.route === 'encours') { ui.justDone = { id: it.id, from: curPct(it) }; clearTimeout(ui.justT); ui.justT = setTimeout(() => { ui.justDone = null; }, 900); if (navigator.vibrate) try { navigator.vibrate(12); } catch (e) { /* */ } }
-    doNext(it);
-  },
+  next(d) { const it = state.items[d.id]; if (!it || (ui.justDone && ui.justDone.id === it.id)) return; doNext(it); },
   ep(d) { toggleUnit(d); },
   vol(d) { toggleUnit(d); },
   book(d) { toggleUnit(d); },
   'ep-upto'(d) { upTo(state.items[d.id], d.k); },
   'vol-upto'(d) { upTo(state.items[d.id], d.k); },
-  'vol-all'(d) { const it = state.items[d.id]; const all = progress(it).done >= it.volumes.length; withXp(() => { volKeys(it).forEach((k) => setDone(it, k, !all)); touched(it); }); },
-  'season-all'(d) {
-    const it = state.items[d.id]; const s = it.seasons.find((x) => x.n === +d.v); const all = seasonDone(it, s);
-    withXp(() => { for (let e = 1; e <= s.count; e++) setDone(it, 's' + s.n + 'e' + e, !all); touched(it); });
+  'vol-all'(d) {
+    const it = state.items[d.id]; const all = progress(it).done >= it.volumes.length;
+    bulk(it, () => volKeys(it).forEach((k) => setDone(it, k, !all)), (n) => all ? 'Tomes décochés' : plural(n, 'tome coché', 'tomes cochés'));
   },
+  'season-all'(d) {
+    const it = state.items[d.id]; const s = it.seasons.find((x) => x.n === +d.v); if (!s) return; const all = seasonDone(it, s);
+    bulk(it, () => { for (let e = 1; e <= s.count; e++) setDone(it, 's' + s.n + 'e' + e, !all); }, (n) => all ? 'Saison ' + s.n + ' décochée' : plural(n, 'épisode coché', 'épisodes cochés'));
+  },
+  'ov-toggle'(d) { ui.ovOpen = ui.ovOpen || {}; ui.ovOpen[d.id] = !ui.ovOpen[d.id]; render(); },
+  // Envies : « J'ai vu le film » enregistre directement le visionnage
+  'envie-seen'(d) { const it = state.items[d.id]; if (!it) return; ui.modal = null; doNext(it); },
+  'envie-start'(d) {
+    const it = state.items[d.id]; if (!it) return; const snap = snapItem(it.id); ui.modal = null;
+    it.status = 'encours'; it.updatedAt = now(); save(); render();
+    undoToast(it.title + ' est dans En cours', snap, 0);
+  },
+  'envie-menu'(d) {
+    const it = state.items[d.id]; if (!it) return; const v = envieVerb(it);
+    openModal(it.title, `<div class="col" style="gap:4px">${sheetRow(v.a === 'envie-seen' ? 'check' : 'play', v.label, v.a === 'envie-seen' ? 'Enregistre le visionnage' : 'Passe dans En cours', `data-a="${v.a}" data-id="${it.id}"`)}
+      ${sheetRow('x', 'Retirer des envies', '', `data-a="envie-remove" data-id="${it.id}"`)}</div>`, { sheet: true });
+  },
+  'envie-remove'(d) {
+    const it = state.items[d.id]; if (!it) return; const snap = snapItem(it.id); ui.modal = null;
+    deleteItem(it.id); checkUnlocks(true); save(); render();
+    undoToast(it.title + ' retiré des envies', snap, 0);
+  },
+  'empty-add'(d) {
+    ui.add.status = d.st || 'encours'; ui.add.catchup = null;
+    if (d.v === 'menu') ACT['add-menu'](); else ACT['add-go']({ v: d.v });
+  },
+  // recherche locale sans résultat → recherche en ligne pour l'ajouter
+  'search-add'(d) {
+    const t = d.v === 'mangabd' ? 'manga' : ADD_TYPES.includes(d.v) && d.v !== 'sport' && d.v !== 'catch' ? d.v : 'serie';
+    Object.assign(ui.add, { type: t, status: d.st || 'encours', catchup: null, results: null, picked: null, manual: false, error: '', q: d.q || '' });
+    location.hash = '#ajouter-' + t;
+    if (d.q) { const fd = new FormData(); fd.set('q', d.q); FORMS.search(fd); }
+  },
+  'goto-envies'(d) { if (FILTERS.some(([k]) => k === d.v)) ui.envies = d.v; location.hash = '#envies'; },
+  'nba-reveal'(d) { ui.reveal[d.id] = true; render(); },
   dd() { ui.ddOpen = !ui.ddOpen; render(); },
   'pick-season'(d) { ui.season[d.id] = +d.v; ui.ddOpen = false; render(); },
   'add-ep'(d) {
@@ -1853,15 +2103,21 @@ const ACT = {
     it.status = d.v; it.updatedAt = now(); save(); render();
   },
   'status-only'(d) { const it = state.items[d.id]; it.status = 'termine'; it.updatedAt = now(); save(); closeModal(); },
+  // menu ⋯ de la fiche : une feuille qui monte du bas, actions explicites, suppression à part en rouge
   'item-menu'(d) {
-    const it = state.items[d.id];
-    openModal(it.title, `<div class="col" style="gap:10px">
-      <div class="field"><span>Statut</span><div class="seg" role="group" aria-label="Statut">${[['envie', 'Envie'], ['encours', 'En cours'], ['termine', 'Terminé']].map(([k, l]) => `<button class="${it.status === k ? 'on' : ''}" data-a="item-status" data-id="${it.id}" data-v="${k}" aria-pressed="${it.status === k}">${l}</button>`).join('')}</div></div>
-      <button class="btn block" data-a="catchup-set" data-id="${it.id}" data-v="${it.catchup ? 0 : 1}">${svgIcon('clock', 18)}${it.catchup ? 'Désactiver le mode rattrapage' : 'Mode rattrapage (cocher sans XP)'}</button>
-      <button class="btn block" data-a="item-edit" data-id="${it.id}">${svgIcon('edit', 18)}Modifier</button>
-      ${it.src && it.src.api === 'tmdb' && it.seasons ? `<button class="btn block" data-a="item-refresh" data-id="${it.id}">${svgIcon('sync', 18)}Actualiser les épisodes</button>` : ''}
-      <button class="btn danger block" data-a="item-del" data-id="${it.id}">${svgIcon('trash', 18)}Supprimer</button>
-      <button class="btn block" data-a="modal-close">Fermer</button></div>`);
+    const it = state.items[d.id]; const sh = shape(it);
+    const reading = it.type === 'livre' || it.type === 'bd' || it.type === 'manga';
+    const canRewatch = (sh === 'episodes' || sh === 'tomes' || sh === 'livre') && progress(it).done > 0;
+    const sw = `<span class="sw-mini${it.catchup ? ' on' : ''}" aria-hidden="true"></span>`;
+    openModal('', `<div class="col" style="gap:4px"><span class="grip" aria-hidden="true"></span><span class="sheet-sub">${esc(it.title)}</span>
+      <span class="field-lab">Statut</span><div class="seg" role="group" aria-label="Statut" style="margin-bottom:8px">${[['envie', 'Envie'], ['encours', 'En cours'], ['termine', 'Terminé']].map(([k, l]) => `<button class="${it.status === k ? 'on' : ''}" data-a="item-status" data-id="${it.id}" data-v="${k}" aria-pressed="${it.status === k}">${l}</button>`).join('')}</div>
+      ${sheetRow('image', 'Changer l’affiche', 'Affiche et bannière', `data-a="item-cover" data-id="${it.id}"`)}
+      ${canRewatch ? sheetRow('redo', reading ? 'Relire depuis le début' : 'Revoir depuis le début', 'Nouveau passage, moitié des XP', `data-a="rewatch" data-id="${it.id}"`) : ''}
+      ${sheetRow('check', 'Mode rattrapage', 'Cocher ce que tu as déjà vu, sans XP ni historique', `data-a="catchup-set" data-id="${it.id}" data-v="${it.catchup ? 0 : 1}" role="switch" aria-checked="${!!it.catchup}"`, sw)}
+      ${sheetRow('edit', 'Modifier les infos', '', `data-a="item-edit" data-id="${it.id}"`)}
+      ${it.src && it.src.api === 'tmdb' && it.seasons ? sheetRow('sync', 'Actualiser depuis TMDB', 'Nouveaux épisodes et saisons', `data-a="item-refresh" data-id="${it.id}"`) : ''}
+      <i class="sheet-sep" aria-hidden="true"></i>
+      ${sheetRow('trash', 'Supprimer ' + (TYPE_OF[it.type] || TYPE_OF.serie)[1], '', `data-a="item-del" data-id="${it.id}"`, '', 'danger')}</div>`, { sheet: true });
   },
   async 'item-refresh'(d) {
     const it = state.items[d.id]; closeModal();
@@ -1893,10 +2149,28 @@ const ACT = {
     const it = state.items[d.id]; it.catchup = d.v === '1'; ui.modal = null; save(); render();
     toast(it.catchup ? 'Rattrapage activé : sans XP' : 'Rattrapage terminé : l’XP compte à nouveau', '', 2400);
   },
+  'profile-edit'() {
+    const s = state.settings;
+    openModal('Mon profil', `<form class="col" style="gap:14px" data-form="profile"><div class="crop-host"></div>
+      <div class="field"><span>Photo de profil</span><div class="row" style="gap:14px"><span class="pf-prev" data-preview="avatar">${s.avatar ? `<img src="${esc(s.avatar)}" alt="">` : svgIcon('user', 30)}</span>
+        <div class="col grow" style="gap:8px"><label class="btn">${svgIcon('image', 18)}${s.avatar ? 'Changer de photo' : 'Choisir une photo'}<input type="file" accept="image/*" data-change="poster-file" data-field="avatar" class="sr"></label>
+        <button type="button" class="btn" data-a="avatar-recrop" ${s.avatar ? '' : 'hidden'}>${svgIcon('edit', 18)}Recadrer</button>
+        ${s.avatar ? `<label class="toggle" style="padding:8px 10px"><input type="checkbox" name="noAvatar"><span class="sw"></span><span class="grow small">Retirer la photo</span></label>` : ''}</div></div>
+        <input type="hidden" name="avatarData" value=""><input type="hidden" name="avatarSrcData" value=""></div>
+      <label class="field"><span>Pseudo</span><input class="input" name="pseudo" value="${esc(s.pseudo || '')}" maxlength="24" autocomplete="nickname" placeholder="Ex. Alex"></label>
+      <span class="small muted">Ton pseudo et ta photo restent sur ce téléphone, et partent dans tes sauvegardes (Exporter).</span>
+      <div class="grid2"><button class="btn" type="button" data-a="modal-close">Annuler</button><button class="btn prim" type="submit">Enregistrer</button></div></form>`);
+  },
+  // recadrer : depuis la photo choisie à l'instant, sinon l'original gardé, sinon la photo actuelle
+  'avatar-recrop'() {
+    const form = document.querySelector('form[data-form="profile"]'); if (!form) return;
+    openCrop(form, form.elements.avatarSrcData.value || state.settings.avatarSrc || state.settings.avatar);
+  },
   'goto-settings'() { const el = document.getElementById('reglages'); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' }); },
   'item-del'(d) {
     const it = state.items[d.id];
-    confirmBox('Supprimer ?', `<b>${esc(it.title)}</b> et tout son historique (et l’XP associée) seront supprimés. C’est définitif.`, 'Supprimer', () => { deleteItem(it.id); checkUnlocks(true); save(); ui.modal = null; history.back(); }, true);
+    // on ne revient en arrière que depuis la fiche (depuis Envies, history.back() quittait la page)
+    confirmBox('Supprimer ?', `<b>${esc(it.title)}</b> et tout son historique (et l’XP associée) seront supprimés. C’est définitif.`, 'Supprimer', () => { const fromItem = ui.route === 'item'; deleteItem(it.id); checkUnlocks(true); save(); ui.modal = null; if (fromItem) ACT.back(); else render(); }, true);
   },
   'goto-catch'() { ui.biblio.type = 'catch'; location.hash = '#biblio'; },
   'match-seen'(d) { const m = state.matches[d.id]; ui.modal = null; withXp(() => matchSee(m, d.mode)); },
@@ -1922,9 +2196,9 @@ const ACT = {
   async 'nba-sync'() { if (nbaRun) return; toast('Récupération des matchs NBA (environ une minute)…', '', 2200); const n = await syncNba(true); toast(n ? plural(n, 'nouveau match') : 'Rien de nouveau pour le moment', n ? 'gold' : '', 2400); },
   'nba-ask'(d) {
     const f = state.nba.feed[d.id];
-    openModal('Tu as vu ce match ?', `<div class="col" style="gap:14px"><div class="row" style="gap:12px;justify-content:center">${nbaLogo(f.h, 52)}<span class="vs">vs</span>${nbaLogo(f.a, 52)}</div>
+    openModal('Comment l’as-tu regardé ?', `<div class="col" style="gap:14px"><div class="row" style="gap:12px;justify-content:center">${nbaLogo(f.h, 52)}<span class="vs">vs</span>${nbaLogo(f.a, 52)}</div>
       <span style="text-align:center;font-weight:700">${esc(f.home)} – ${esc(f.away)}</span><span class="small muted" style="text-align:center">${esc(nightLabel(f.night))}</span>
-      <div class="seg">${Object.keys(MODES).map((k) => `<button data-a="nba-see" data-id="${f.id}" data-mode="${k}">${MODES[k]}</button>`).join('')}</div><button class="btn block" data-a="modal-close">Annuler</button></div>`);
+      <div class="seg">${Object.keys(MODES).map((k) => `<button data-a="nba-see" data-id="${f.id}" data-mode="${k}">${modeCap(k)}</button>`).join('')}</div><button class="btn block" data-a="modal-close">Annuler</button></div>`);
   },
   'nba-see'(d) { const f = state.nba.feed[d.id]; ui.modal = null; withXp(() => nbaSee(f, d.mode)); },
   async 'sport-sync'() { toast('Récupération des matchs…', '', 1400); const ok = await syncSport(true); toast(ok ? 'Matchs à jour' : 'Impossible de joindre TheSportsDB pour le moment.', '', 2600); },
@@ -2001,12 +2275,13 @@ const ACT = {
   'add-go'(d) { ui.modal = null; ui.add.type = d.v; location.hash = '#ajouter-' + d.v; render(); },
   'env-type'(d) { ui.envies = d.v; render(); },
   'histo-type'(d) { ui.histoF = d.v; render(); },
+  'histo-more'() { ui.histoN = (ui.histoN || 14) + 12; render(); },
   'badges-all'() {
     const bs = badgeStates().sort((a, b) => (b.won ? 1 : 0) - (a.won ? 1 : 0));
     openModal('Tous les badges', `<div class="list">${bs.map(badgeRow).join('')}</div><button class="btn block" data-a="modal-close" style="margin-top:12px">Fermer</button>`);
   },
-  'match-confirm'(d) { const m = state.matches[d.id]; openModal('Tu as vu ce match ?', `<div class="col" style="gap:12px"><span style="font-weight:700">${esc(m.home)} – ${esc(m.away)}</span><span class="small muted">${esc(fmtMatch(m.ts))}</span><div class="seg">${Object.keys(MODES).map((k) => `<button data-a="match-seen" data-id="${m.id}" data-mode="${k}">${MODES[k]}</button>`).join('')}</div><button class="btn block" data-a="match-dismiss" data-id="${m.id}">Pas vu</button></div>`); },
-  'show-confirm'(d) { const x = state.shows[d.id]; openModal('Tu as vu ce show ?', `<div class="col" style="gap:12px"><span style="font-weight:700">${esc(x.name)}</span><span class="small muted">${esc(x.fed)} · ${esc(fmtMatch(x.ts))}</span><div class="seg">${Object.keys(MODES).map((k) => `<button data-a="show-seen" data-id="${x.id}" data-mode="${k}">${MODES[k]}</button>`).join('')}</div><button class="btn block" data-a="show-dismiss" data-id="${x.id}">Pas vu</button></div>`); },
+  'match-confirm'(d) { const m = state.matches[d.id]; openModal('Comment l’as-tu regardé ?', `<div class="col" style="gap:12px"><span style="font-weight:700">${esc(m.home)} – ${esc(m.away)}</span><span class="small muted">${esc(fmtMatch(m.ts))}</span><div class="seg">${Object.keys(MODES).map((k) => `<button data-a="match-seen" data-id="${m.id}" data-mode="${k}">${modeCap(k)}</button>`).join('')}</div><button class="btn block" data-a="match-dismiss" data-id="${m.id}">Je ne l’ai pas vu</button></div>`); },
+  'show-confirm'(d) { const x = state.shows[d.id]; openModal('Comment l’as-tu regardé ?', `<div class="col" style="gap:12px"><span style="font-weight:700">${esc(x.name)}</span><span class="small muted">${esc(x.fed)} · ${esc(fmtMatch(x.ts))}</span><div class="seg">${Object.keys(MODES).map((k) => `<button data-a="show-seen" data-id="${x.id}" data-mode="${k}">${modeCap(k)}</button>`).join('')}</div><button class="btn block" data-a="show-dismiss" data-id="${x.id}">Je ne l’ai pas vu</button></div>`); },
   'bib-type'(d) { ui.biblio.type = d.v; render(); if (d.v === 'sport') syncSport(); },
   'bib-status'(d) { ui.biblio.status = d.v; render(); },
   'add-type'(d) {
@@ -2044,14 +2319,16 @@ const ACT = {
     catch (e) { toast('Copie impossible ici.', '', 2600); }
   },
   'load-demo'() { loadDemo(); toast('Données de démo chargées'); },
-  'clear-demo'() { confirmBox('Effacer la démo ?', 'Toutes les données de démonstration seront supprimées. Tes clés sont conservées.', 'Effacer', () => { resetState(); closeModal(); }, true); },
+  'clear-demo'() { confirmBox('Effacer la démo ?', 'Toutes les données de démonstration seront supprimées. Tes clés sont conservées.', 'Effacer', () => { resetState(true); closeModal(); }, true); },
   wipe() { confirmBox('Tout effacer ?', 'Toutes tes données (œuvres, historique, XP, badges) seront supprimées de ce téléphone. Exporte une sauvegarde avant si besoin. C’est définitif.', 'Tout effacer', () => { resetState(); closeModal(); }, true); },
   'modal-close'() { closeModal(); },
   'modal-yes'() { const f = ui.modal && ui.modal.onYes; ui.modal = null; if (f) f(); render(); },
   'modal-bg'(d, el, e) { if (e.target === el) closeModal(); }
 };
-function resetState() {
-  const keep = { tmdbKey: state.settings.tmdbKey, rawgKey: state.settings.rawgKey };
+// keepProfile : effacer la démo garde ton pseudo et ta photo ; « Tout effacer » les supprime aussi
+function resetState(keepProfile) {
+  const s0 = state.settings; const keep = { tmdbKey: s0.tmdbKey, rawgKey: s0.rawgKey };
+  if (keepProfile) Object.assign(keep, { pseudo: s0.pseudo || '', avatar: s0.avatar || '', avatarSrc: s0.avatarSrc || '' });
   state = freshState(); Object.assign(state.settings, keep); seedState(); save(); location.hash = '#encours'; render();
 }
 const FORMS = {
@@ -2088,7 +2365,12 @@ const FORMS = {
     const id = uid(); const ts = Date.parse(fd.get('date')) || now();
     const m = { id, ext: false, team: null, sport: fd.get('sport'), league: String(fd.get('league') || '').trim(), home: String(fd.get('home')).trim(), away: String(fd.get('away')).trim(), ts,
       hs: fd.get('hs') !== '' ? +fd.get('hs') : null, as: fd.get('as') !== '' ? +fd.get('as') : null, seen: null, dismissed: false };
-    for (const t of Object.values(TEAMS)) if ([m.home, m.away].some((n) => n.toLowerCase().includes(t.short.toLowerCase()) || n.toLowerCase() === t.name.toLowerCase())) { m.team = t.key; m.homeId = m.home.toLowerCase().includes(t.short.toLowerCase()) ? t.id : ''; }
+    // équipe suivie reconnue par son nom (« Inter Milan » n'est pas le Milan AC)
+    const fav = { sixers: /\b(76ers|sixers)\b/i, milan: /^(ac )?milan( ac)?$/i };
+    for (const t of Object.values(TEAMS)) {
+      const isT = (n) => fav[t.key].test(n.trim()) || n.trim().toLowerCase() === t.name.toLowerCase();
+      if (isT(m.home) || isT(m.away)) { m.team = t.key; m.homeId = isT(m.home) ? t.id : ''; m.awayId = isT(m.away) ? t.id : ''; }
+    }
     state.matches[id] = m;
     const mode = fd.get('mode');
     withXp(() => { if (mode) matchSee(m, mode); });
@@ -2138,6 +2420,13 @@ const FORMS = {
   'catch-show'(fd) {
     createItem({ type: 'catch', title: String(fd.get('title')).trim(), status: 'encours', ended: false, src: { api: 'manuel' }, seasons: [{ n: 1, name: 'Épisodes', count: 0, eps: [] }] });
     save(); closeModal();
+  },
+  profile(fd) {
+    const s = state.settings;
+    s.pseudo = String(fd.get('pseudo') || '').trim().slice(0, 24);
+    const img = String(fd.get('avatarData') || '').trim(); const src = String(fd.get('avatarSrcData') || '').trim();
+    if (fd.get('noAvatar')) { s.avatar = ''; s.avatarSrc = ''; } else if (img) { s.avatar = img; if (src) s.avatarSrc = src; }
+    ui.modal = null; save(); render(); toast('Profil enregistré');
   },
   keys(fd) { state.settings.tmdbKey = String(fd.get('tmdb') || '').trim(); state.settings.rawgKey = String(fd.get('rawg') || '').trim(); save(); toast('Réglages enregistrés'); },
   goals(fd) {
@@ -2236,6 +2525,8 @@ document.addEventListener('change', (e) => {
   if (a === 'poster-file') {
     const file = el.files && el.files[0]; if (!file) return;
     const form = el.closest('form'); const f = el.dataset.field || 'poster';
+    // photo de profil : on ouvre le recadrage sur l'original réduit à 1024 px
+    if (f === 'avatar') { imageToDataUrl(file, 1024, 1024).then((src) => openCrop(form, src)).catch(() => toast('Image illisible.', '', 2600)); el.value = ''; return; }
     imageToDataUrl(file, f === 'backdrop' ? 960 : 480, f === 'backdrop' ? 600 : 4000).then((data) => {
       if (form && form.elements[f + 'Data']) form.elements[f + 'Data'].value = data;
       const pv = form && form.querySelector(`[data-preview="${f}"]`); if (pv) pv.innerHTML = `<img src="${data}" alt="">`;
@@ -2260,14 +2551,17 @@ document.addEventListener('change', keepCatchField);
 document.addEventListener('input', (e) => {
   keepCatchField(e);
   if (e.target.dataset.filter !== 'bib') return;
-  const q = e.target.value.trim().toLowerCase();
-  document.querySelectorAll('.mcard[data-title]').forEach((t) => { t.style.display = !q || t.dataset.title.includes(q) ? '' : 'none'; });
+  const raw = e.target.value.trim(); const q = raw.toLowerCase(); let shown = 0;
+  document.querySelectorAll('.mcard[data-title]').forEach((t) => { const ok = !q || t.dataset.title.includes(q); t.style.display = ok ? '' : 'none'; if (ok) shown++; });
+  const slot = document.querySelector('.es-search');
+  if (slot) { const none = !!q && !shown; slot.hidden = !none; slot.innerHTML = none ? searchEmptyHtml(raw, slot.dataset.type, slot.dataset.st) : ''; }
 });
 // images qui ne chargent pas : on garde le dégradé
 document.addEventListener('error', (e) => { if (e.target && e.target.tagName === 'IMG') e.target.remove(); }, true);
 window.addEventListener('hashchange', () => { if (ui.modal) ui.modal = null; render(); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && ui.modal) closeModal(); });
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flush(); });
+window.addEventListener('pagehide', () => { flush(); });
 
 /* =========================================================
    13. Données de démonstration
@@ -2278,7 +2572,7 @@ function seedState() {
   }
 }
 function loadDemo() {
-  const keep = { tmdbKey: state.settings.tmdbKey, rawgKey: state.settings.rawgKey };
+  const s0 = state.settings; const keep = { tmdbKey: s0.tmdbKey, rawgKey: s0.rawgKey, pseudo: s0.pseudo || '', avatar: s0.avatar || '', avatarSrc: s0.avatarSrc || '' };
   state = freshState(); Object.assign(state.settings, keep); state.demo = true;
   const T = now(); const d = (days, h) => T - days * DAY + (h || 0) * 3600000;
   const serie = createItem({ type: 'serie', title: 'Station Zéro', year: '2025', status: 'encours', runtime: 44, overview: 'Exemple de série (données de démonstration).',
