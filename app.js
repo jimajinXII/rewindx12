@@ -3,7 +3,7 @@
    sauf les recherches de titres vers TMDB, AniList (manga), Google Books, Open Library, RAWG et TheSportsDB. */
 'use strict';
 
-const APP_VERSION = '3.1.0';
+const APP_VERSION = '3.1.2';
 const DAY = 86400000;
 
 /* =========================================================
@@ -1125,11 +1125,13 @@ function viewEncours() {
     const top = items[0]; const nx = nextUnit(top); const sh = shape(top);
     const img = top.backdrop || top.poster; const glow = glowOf(top);
     const named = nx && nx.title && !/^Épisode \d+$/.test(nx.title);
+    const jd = ui.justDone && ui.justDone.id === top.id ? ui.justDone : null;
+    const topBar = jd ? `<div class="bar thick bar-anim" role="img" aria-label="${curPct(top)} %" style="--from:${jd.from}%"><i style="width:${curPct(top)}%"></i></div>` : bar(curPct(top), 'thick');
     const sub = nx && sh === 'episodes' ? [named ? '« ' + nx.title + ' »' : '', fmtRt(nx.rt || top.runtime)].filter(Boolean).join(' · ') : '';
-    h += `<div class="hero-wrap"${glow ? ` style="--glow:${glow}"` : ''}><section class="hero${glow ? ' tinted' : ''}" aria-label="${esc(top.title)}, en cours">
+    h += `<div class="hero-wrap"${glow ? ` style="--glow:${glow}"` : ''}><section class="hero${glow ? ' tinted' : ''}${jd ? ' just' : ''}" aria-label="${esc(top.title)}, en cours">
       <a class="img" href="#item-${top.id}" aria-label="Ouvrir la fiche de ${esc(top.title)}" style="background:${grad(top.title)}">${img ? `<img src="${esc(img)}" alt="" loading="lazy">` : ''}${catBadge(top.type)}<h2 class="tt">${esc(top.title)}</h2></a>
       <div class="body"><div class="col" style="gap:3px"><div class="line"><span>${esc(progressText(top))}</span><span>${curPct(top)} %</span></div>${sub ? `<span class="sub">${esc(sub)}</span>` : ''}</div>
-        ${bar(curPct(top), 'thick')}
+        ${topBar}
         ${top.catchup ? `<span class="label amber">Mode rattrapage actif · sans XP</span>` : ''}
         <div class="acts">${nx ? `<button class="btn prim" data-a="next" data-id="${top.id}">${svgIcon('check', 22)}${esc(doneLabel(top, nx))}</button>` : `<a class="btn prim" href="#item-${top.id}">Voir la fiche</a>`}
           ${sh === 'episodes' || sh === 'tomes' || sh === 'livre' ? `<a class="sq" href="#item-${top.id}" aria-label="Voir ${sh === 'episodes' ? 'les épisodes' : 'les tomes'}">${svgIcon('list', 24)}</a>` : ''}</div>
@@ -1802,7 +1804,12 @@ function upTo(it, key) {
 function toggleUnit(d) { const it = state.items[d.id]; const on = !curPass(it).done[d.k]; withXp(() => { setDone(it, d.k, on); touched(it); }); }
 const ACT = {
   back() { if (history.length > 1) history.back(); else location.hash = '#encours'; },
-  next(d) { const it = state.items[d.id]; if (it) doNext(it); },
+  next(d) {
+    const it = state.items[d.id]; if (!it) return;
+    // En cours : petite animation de validation (bouton, coche, barre qui avance depuis l'ancienne valeur)
+    if (ui.route === 'encours') { ui.justDone = { id: it.id, from: curPct(it) }; clearTimeout(ui.justT); ui.justT = setTimeout(() => { ui.justDone = null; }, 900); if (navigator.vibrate) try { navigator.vibrate(12); } catch (e) { /* */ } }
+    doNext(it);
+  },
   ep(d) { toggleUnit(d); },
   vol(d) { toggleUnit(d); },
   book(d) { toggleUnit(d); },
