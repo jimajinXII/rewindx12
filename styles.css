@@ -68,6 +68,11 @@ body::after { content: ''; position: fixed; inset: 0; z-index: 100; pointer-even
 .sec-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 30px; padding: 0 4px; }
 .sec-head a, .sec-head .link { display: flex; align-items: center; gap: 2px; min-height: 44px; font-size: 15px; font-weight: 500; color: var(--soft); text-decoration: none; }
 .sec-head .count { font-size: 14px; color: var(--tab); }
+.h2 .count { font-size: 14px; font-weight: 700; color: var(--muted); }
+.fold-btn { flex: none; width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 10px; background: none; color: var(--muted); }
+.fold-btn svg { transition: transform .2s; transform: rotate(180deg); }
+.bib-sec.folded .fold-btn svg { transform: none; }
+.bib-sec.folded:not(.searching) .mgrid { display: none; }
 .grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .grid4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px 8px; }
 

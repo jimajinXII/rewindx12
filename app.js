@@ -1179,7 +1179,7 @@ function upsertMatch(ev, t) {
    7. Interface : icônes, pictogrammes, affiches, toasts
    ========================================================= */
 const ICONS = {
-  play: 'M8 5v14l11-7z', star: 'M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z',
+  play: 'M8 5v14l11-7z', home: 'M4 10.5L12 4l8 6.5V20h-5.5v-5.5h-5V20H4z', star: 'M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z',
   clock: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z M12 7v5l3.5 2', user: 'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8z M4.5 20.5c1.3-3.6 4.2-5.4 7.5-5.4s6.2 1.8 7.5 5.4',
   biblio: 'M7 4h10a3 3 0 0 1 3 3v10a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3z M9 4v16',
   check: 'M5 12.5l4.5 4.5L19 7.5', back: 'M19 12H5M11 6l-6 6 6 6', chevD: 'M6 9l6 6 6-6', chevL: 'M15 6l-6 6 6 6', chevR: 'M9 6l6 6-6 6',
@@ -1218,7 +1218,7 @@ const CAT = {
 const FILTERS = [['tout', 'Tout'], ['serie', 'Séries'], ['film', 'Films'], ['doc', 'Docus'], ['livre', 'Livres'], ['mangabd', 'Manga, BD', 'volume'], ['jeu', 'Jeux'], ['sport', 'Sport'], ['catch', 'Catch']];
 const typeIn = (f, type) => f === 'tout' || f === type || (f === 'mangabd' && (type === 'manga' || type === 'bd'));
 const catIcon = (type) => (CAT[type] || CAT.serie)[0];
-// iconOnly : pictogramme seul dans un carré (grande carte, petites cartes « En ce moment »)
+// iconOnly : pictogramme seul dans un carré (grande carte, petites cartes « En cours »)
 function catBadge(type, iconOnly) { const c = CAT[type] || CAT.serie; return iconOnly ? `<span class="cat ico" role="img" aria-label="${c[1]}">${svgIcon(c[0], 14)}</span>` : `<span class="cat">${svgIcon(c[0], 13)}${c[1]}</span>`; }
 function chipsHtml(list, on, action, label) {
   return `<div class="chips" role="group" aria-label="${label || 'Catégorie'}">${list.map(([k, l, ic]) => {
@@ -1385,7 +1385,7 @@ function errText(e) {
    ========================================================= */
 const ui = {
   route: 'encours', arg: null, modal: null, season: {}, ddOpen: false, reveal: {}, matchMode: {},
-  biblio: { type: 'tout', status: 'tous' }, envies: 'tout', histoF: 'tout',
+  biblio: { type: 'tout' }, envies: 'tout', histoF: 'tout',
   add: { type: 'serie', q: '', results: null, loading: false, error: '', picked: null, manual: false, status: 'encours', catchup: null, tomes: '', pages: '' }
 };
 function parseRoute() {
@@ -1394,7 +1394,7 @@ function parseRoute() {
   if (i > 0 && ['item', 'match', 'rewind', 'ajouter'].includes(h.slice(0, i))) return { route: h.slice(0, i), arg: h.slice(i + 1) };
   return { route: h || 'encours', arg: null };
 }
-const TABS = [{ r: 'encours', label: 'En cours', icon: 'play' }, { r: 'biblio', label: 'Biblio', icon: 'biblio' }, { r: 'envies', label: 'Envies', icon: 'star' }, { r: 'histo', label: 'Histo', icon: 'clock' }];
+const TABS = [{ r: 'encours', label: 'Accueil', icon: 'home' }, { r: 'biblio', label: 'Biblio', icon: 'biblio' }, { r: 'envies', label: 'Envies', icon: 'star' }, { r: 'histo', label: 'Histo', icon: 'clock' }];
 // 4 onglets et le bouton + au centre (le profil est dans l'avatar, en haut à droite)
 function navHtml(active, plusHref) {
   const tab = (t) => `<a href="#${t.r}" class="${t.r === active ? 'on' : ''}" ${t.r === active ? 'aria-current="page"' : ''}>${svgIcon(t.icon, 24)}<span>${t.label}</span></a>`;
@@ -1512,7 +1512,7 @@ function viewEncours() {
   const pend = pendingMatches().slice(0, 3);
   const pshows = showsPending().slice(0, 3);
   const upcoming = showsUpcoming().filter((s) => s.ts < now() + 45 * DAY).slice(0, 4);
-  let h = head('En cours');
+  let h = head('Accueil');
   if (!userItems.length && !Object.keys(state.matches).length && !state.catchLog.length && !Object.keys(state.shows).length) {
     h += `<section class="card pad col" aria-label="Bienvenue"><span class="label accent">Bienvenue sur Rewind</span>
       <p style="margin:0;line-height:1.5">Pour bien démarrer :</p>
@@ -1541,7 +1541,7 @@ function viewEncours() {
         <div class="acts">${nx || jd ? mainBtn(top, nx) : `<a class="btn prim" href="#item-${top.id}">Voir la fiche</a>`}
           ${sh === 'episodes' || sh === 'tomes' || sh === 'livre' ? `<a class="sq" href="#item-${top.id}" aria-label="Voir ${sh === 'episodes' ? 'les épisodes' : 'les tomes'}">${svgIcon('list', 24)}</a>` : ''}</div>
       </div></section></div>`;
-    if (items.length > 1) h += `<section class="section" aria-label="En ce moment">${secHead('En ce moment', '#biblio')}<div class="mrow">${items.slice(1, 10).map((it) => mcard(it, { short: true })).join('')}</div></section>`;
+    if (items.length > 1) h += `<section class="section" aria-label="En cours">${secHead('En cours', '#biblio').replace('<a href', '<a data-a="bib-all" href')}<div class="mrow">${items.slice(1, 10).map((it) => mcard(it, { short: true })).join('')}</div></section>`;
   } else if (userItems.length) {
     h += `<div class="empty">Rien en cours pour l’instant.<br><a href="#envies">Pioche dans tes envies</a> ou ajoute quelque chose avec +.</div>`;
   }
@@ -1560,22 +1560,28 @@ function viewEncours() {
 }
 
 /* ---------- Bibliothèque ---------- */
+// section « Terminés » repliée ou non : simple confort, gardé sur ce téléphone seulement
+function finFolded() { try { return localStorage.getItem('rewind-fin-fold') === '1'; } catch (e) { return false; } }
 function viewBiblio() {
   const f = ui.biblio;
-  let h = head('Biblio') + chipsHtml(FILTERS, f.type, 'bib-type');
-  if (f.type === 'sport') return page(h + sportSection() + nbaSection(), 'biblio', '#ajouter-sport');
-  if (f.type === 'catch') return page(h + catchSection(), 'biblio', '#ajouter-catch');
-  h += `<div class="seg" role="group" aria-label="Statut">${[['tous', 'Tous'], ['encours', 'En cours'], ['termine', 'Terminés']].map(([k, l]) => `<button class="${f.status === k ? 'on' : ''}" data-a="bib-status" data-v="${k}" aria-pressed="${f.status === k}">${l}</button>`).join('')}</div>
-    <label class="search"><span class="sr">Filtrer</span>${svgIcon('search', 18)}<input class="input" type="search" placeholder="Filtrer ma bibliothèque" data-filter="bib"></label>`;
-  const list = Object.values(state.items).filter((i) => i.status !== 'envie' && i.type !== 'catch' && typeIn(f.type, i.type) && (f.status === 'tous' || i.status === f.status))
-    .sort((a, b) => b.updatedAt - a.updatedAt);
-  if (list.length) h += `<div class="mgrid">${list.map((it) => mcard(it, { noCat: f.type !== 'tout' })).join('')}</div>${searchEmptySlot(f.type, 'encours')}`;
-  else {
+  const chips = chipsHtml(FILTERS, f.type, 'bib-type');
+  if (f.type === 'sport') return page(head('Biblio') + chips + sportSection() + nbaSection(), 'biblio', '#ajouter-sport');
+  if (f.type === 'catch') return page(head('Biblio') + chips + catchSection(), 'biblio', '#ajouter-catch');
+  let h = head('Biblio') + `<label class="search"><span class="sr">Rechercher</span>${svgIcon('search', 18)}<input class="input" type="search" placeholder="Rechercher dans ma bibliothèque" data-filter="bib"></label>` + chips;
+  const list = Object.values(state.items).filter((i) => i.status !== 'envie' && i.type !== 'catch' && typeIn(f.type, i.type)).sort((a, b) => b.updatedAt - a.updatedAt);
+  if (list.length) {
+    // une section par statut, plus de sélecteur Tous / En cours / Terminés ; les terminés se replient
+    const sec = (st, title, fold) => {
+      const its = list.filter((i) => (st === 'termine') === (i.status === 'termine')); if (!its.length) return '';
+      const btn = fold === undefined ? '' : `<button class="fold-btn" data-a="bib-fold" aria-expanded="${!fold}" aria-label="${fold ? 'Afficher' : 'Replier'} les terminés">${svgIcon('chevD', 20)}</button>`;
+      return `<section class="section bib-sec${fold ? ' folded' : ''}" aria-label="${title}"><div class="sec-head"><h2 class="h2">${title} <span class="count">${its.length}</span></h2>${btn}</div>
+        <div class="mgrid">${its.map((it) => mcard(it, { noCat: f.type !== 'tout' })).join('')}</div></section>`;
+    };
+    h += sec('encours', 'En cours') + sec('termine', 'Terminés', finFolded()) + searchEmptySlot(f.type, 'encours');
+  } else {
     const hasEnvies = Object.values(state.items).some((i) => i.status === 'envie' && typeIn(f.type, i.type));
     const link = hasEnvies ? `<a class="link" href="#envies" data-a="goto-envies" data-v="${f.type}">Ou pioche dans tes envies</a>` : '';
-    if (f.status === 'termine') h += emptyState('check', 'Rien de terminé pour l’instant', 'Quand tu finiras une série, un livre ou un jeu, il viendra se ranger ici.', `<button class="btn ghost-ac" data-a="bib-status" data-v="encours">Voir ce que tu as en cours</button>`);
-    else if (f.status === 'encours') h += emptyState('play', 'Rien en cours ici', 'Passe une envie en cours, ou ajoute ce que tu as commencé.', emptyBtns(f.type === 'tout' ? EMPTY.tout[3] : EMPTY[f.type][3], 'encours'), link);
-    else { const e = EMPTY[f.type] || EMPTY.tout; h += emptyState(e[0], e[1], e[2], emptyBtns(e[3], 'encours'), link); }
+    const e = EMPTY[f.type] || EMPTY.tout; h += emptyState(e[0], e[1], e[2], emptyBtns(e[3], 'encours'), link);
   }
   return page(h, 'biblio');
 }
@@ -1683,7 +1689,7 @@ function catchSection() {
   shows.forEach((s) => { h += `<a class="card-row" href="#item-${s.id}">${itemPoster(s, 'sm')}<div class="col grow" style="gap:3px"><span class="label accent">Hebdo</span><span class="ti">${esc(s.title)}</span><span class="small muted">${esc(progressText(s))}</span></div></a>`; });
   const planned = Object.values(state.shows).filter((s) => !s.seen && !s.dismissed).sort((a, b) => a.ts - b.ts);
   h += `<div class="sec-head"><h2 class="h2">À venir</h2><a class="link" href="#ajouter-catch">+ Programmer</a></div>`;
-  if (!planned.length) h += `<div class="empty">Aucun show programmé. Ajoute le prochain gala ou PPV avec son affiche : il apparaîtra dans En cours le jour J.</div>`;
+  if (!planned.length) h += `<div class="empty">Aucun show programmé. Ajoute le prochain gala ou PPV avec son affiche : il apparaîtra sur l’Accueil le jour J.</div>`;
   planned.forEach((s) => { h += `<button class="card-row" data-a="show-open" data-id="${s.id}">${posterHtml(s.name, s.poster, 'sm')}<div class="col grow" style="gap:3px"><span class="label">${esc(fmtMatch(s.ts))} · ${esc(s.fed)} · ${esc(CKINDS[s.kind] || 'Show')}</span><span class="ti">${esc(s.name)}</span></div><span class="pill ${s.ts < now() ? 'amber' : isToday(s.ts) ? 'live' : ''}">${s.ts < now() ? 'Tu l’as vu ?' : esc(untilText(s.ts))}</span></button>`; });
   const log = state.catchLog.slice().sort((a, b) => b.ts - a.ts);
   const byFed = {}; log.forEach((c) => { byFed[c.fed] = (byFed[c.fed] || 0) + 1; });
@@ -2184,7 +2190,7 @@ function catchForm() {
     ${plan ? '' : `<label class="field"><span>Vu en</span><select class="input" name="mode" data-keep="mode">${Object.keys(MODES).map((k) => `<option value="${k}" ${(cf.mode || 'differe') === k ? 'selected' : ''}>${MODES[k]}${k === 'resume' ? ` (+${XP.catchResume} XP)` : ''}</option>`).join('')}</select></label>`}
     ${posterField(a.cposter)}
     <button class="btn prim block" type="submit">${plan ? 'Programmer le show' : 'Ajouter au journal'}</button>
-    <span class="small muted">${plan ? 'Le jour J, le show apparaît dans En cours. Une fois passé, Rewind te demande si tu l’as vu.' : 'Pour AEW Dynamite, utilise plutôt sa fiche dans Biblio › Catch : chaque épisode s’y coche comme une série.'}</span></form>`;
+    <span class="small muted">${plan ? 'Le jour J, le show apparaît sur l’Accueil. Une fois passé, Rewind te demande si tu l’as vu.' : 'Pour AEW Dynamite, utilise plutôt sa fiche dans Biblio › Catch : chaque épisode s’y coche comme une série.'}</span></form>`;
 }
 function catchTmdbBlock() {
   const a = ui.add; const t = a.ctm || {};
@@ -2657,6 +2663,7 @@ const ACT = {
     // on ne revient en arrière que depuis la fiche (depuis Envies, history.back() quittait la page)
     confirmBox('Supprimer ?', `<b>${esc(it.title)}</b> et tout son historique (et l’XP associée) seront supprimés. C’est définitif.`, 'Supprimer', () => { const fromItem = ui.route === 'item'; deleteItem(it.id); checkUnlocks(true); save(); ui.modal = null; if (fromItem) ACT.back(); else render(); }, true);
   },
+  'bib-all'() { ui.biblio.type = 'tout'; location.hash = '#biblio'; },
   'goto-catch'() { ui.biblio.type = 'catch'; location.hash = '#biblio'; },
   'match-seen'(d) { const m = state.matches[d.id]; ui.modal = null; withXp(() => matchSee(m, d.mode)); },
   'match-unsee'(d) { withXp(() => matchUnsee(state.matches[d.id])); },
@@ -2764,7 +2771,7 @@ const ACT = {
   'match-confirm'(d) { const m = state.matches[d.id]; openModal('Comment l’as-tu regardé ?', `<div class="col" style="gap:12px"><span style="font-weight:700">${esc(m.home)} – ${esc(m.away)}</span><span class="small muted">${esc(fmtMatch(m.ts))}</span><div class="seg">${Object.keys(MODES).map((k) => `<button data-a="match-seen" data-id="${m.id}" data-mode="${k}">${modeCap(k)}</button>`).join('')}</div><button class="btn block" data-a="match-dismiss" data-id="${m.id}">Je ne l’ai pas vu</button></div>`); },
   'show-confirm'(d) { const x = state.shows[d.id]; openModal('Comment l’as-tu regardé ?', `<div class="col" style="gap:12px"><span style="font-weight:700">${esc(x.name)}</span><span class="small muted">${esc(x.fed)} · ${esc(fmtMatch(x.ts))}</span><div class="seg">${Object.keys(MODES).map((k) => `<button data-a="show-seen" data-id="${x.id}" data-mode="${k}">${modeCap(k)}</button>`).join('')}</div><button class="btn block" data-a="show-dismiss" data-id="${x.id}">Je ne l’ai pas vu</button></div>`); },
   'bib-type'(d) { ui.biblio.type = d.v; render(); if (d.v === 'sport') syncSport(); },
-  'bib-status'(d) { ui.biblio.status = d.v; render(); },
+  'bib-fold'() { try { localStorage.setItem('rewind-fin-fold', finFolded() ? '0' : '1'); } catch (e) { /* stockage indisponible */ } render(); },
   'add-type'(d) {
     Object.assign(ui.add, { type: d.v, results: null, picked: null, manual: false, error: '', tomes: '', pages: '' });
     try { history.replaceState(null, '', '#ajouter-' + d.v); } catch (e) { /* */ }
@@ -3001,7 +3008,7 @@ function render() {
   lastRouteKey = key;
   const chipOn = app.querySelector('.chips .chip.on');
   if (chipOn && chipOn.parentElement.scrollWidth > chipOn.parentElement.clientWidth) chipOn.parentElement.scrollLeft = chipOn.offsetLeft - chipOn.parentElement.clientWidth / 2 + chipOn.clientWidth / 2;
-  const titles = { badges: 'Badges', encours: 'En cours', biblio: 'Biblio', envies: 'Envies', histo: 'Historique', profil: 'Profil', ajouter: 'Ajouter', rewind: 'Rewind ' + (r.arg || '') };
+  const titles = { badges: 'Badges', encours: 'Accueil', biblio: 'Biblio', envies: 'Envies', histo: 'Historique', profil: 'Profil', ajouter: 'Ajouter', rewind: 'Rewind ' + (r.arg || '') };
   document.title = 'Rewind' + (titles[r.route] ? ' · ' + titles[r.route] : r.route === 'item' && state.items[r.arg] ? ' · ' + state.items[r.arg].title : '');
 }
 
@@ -3069,6 +3076,7 @@ document.addEventListener('input', (e) => {
   if (e.target.dataset.filter !== 'bib') return;
   const raw = e.target.value.trim(); const q = raw.toLowerCase(); let shown = 0;
   document.querySelectorAll('.mcard[data-title]').forEach((t) => { const ok = !q || t.dataset.title.includes(q); t.style.display = ok ? '' : 'none'; if (ok) shown++; });
+  document.querySelectorAll('.bib-sec').forEach((sec) => { sec.classList.toggle('searching', !!q); sec.hidden = !!q && !sec.querySelector('.mcard[data-title]:not([style*="none"])'); });
   const slot = document.querySelector('.es-search');
   if (slot) { const none = !!q && !shown; slot.hidden = !none; slot.innerHTML = none ? searchEmptyHtml(raw, slot.dataset.type, slot.dataset.st) : ''; }
 });
