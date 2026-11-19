@@ -104,7 +104,7 @@ const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
 function freshState() {
   return {
     version: 1, createdAt: now(), demo: false,
-    settings: { tmdbKey: '', rawgKey: '', pseudo: '', avatar: '', avatarSrc: '', goals: { films: 4, tomes: 5, episodes: 20, matchs: 8 }, catchTrialStart: now(), title: '', vitrine: [], banner: '' },
+    settings: { tmdbKey: '', rawgKey: '', pseudo: '', avatar: '', avatarSrc: '', goals: { films: 4, tomes: 5, episodes: 20, matchs: 8 }, catchTrialStart: now(), title: '', vitrine: [], banner: '', noel: 'off', snow: true },
     items: {}, events: [], matches: {}, catchLog: [], shows: {}, feds: DEFAULT_FEDS.map((f) => Object.assign({}, f)), goalsByMonth: {}, unlocked: {}, lastLevel: 1,
     tiers: {}, secrets: {}, colls: {}, v33At: now(), lastExport: null, sportSync: 0, logos: {}, logoTry: {}, catchFeed: {}, catchSync: {}, nba: { ids: { PHI: '134863', BOS: '134860' }, feed: {}, lastRun: 0 }
   };
@@ -258,6 +258,7 @@ function sanitize(s) {
     it.title = String(it.title == null ? 'Sans titre' : it.title);
     for (const k of ['runtime', 'createdAt', 'updatedAt']) it[k] = num(it[k], k === 'runtime' ? 0 : now());
     if (it.playtime != null) it.playtime = num(it.playtime, 0);
+    if (it.noel != null) it.noel = !!it.noel; if (it.noelManual != null) it.noelManual = !!it.noelManual;
     if (it.format != null && !FORMATS[it.format]) delete it.format;
     if (it.countries != null && !Array.isArray(it.countries)) delete it.countries;
     if (Array.isArray(it.seasons)) it.seasons.forEach((x, i) => { x.n = num(x.n, i + 1); x.count = Math.max(0, Math.floor(num(x.count, 0))); if (Array.isArray(x.eps)) x.eps.forEach((e) => { if (isObj(e)) e.rt = num(e.rt, 0); }); else x.eps = null; });
@@ -286,6 +287,7 @@ function sanitize(s) {
   for (const mk of Object.keys(s.goalsByMonth)) { const x = s.goalsByMonth[mk]; if (!isObj(x)) delete s.goalsByMonth[mk]; else for (const k in x) x[k] = num(x[k], 0); }
   for (const k of Object.keys(s.unlocked)) s.unlocked[k] = num(s.unlocked[k], now());
   s.settings.pseudo = String(s.settings.pseudo || '').slice(0, 24);
+  if (!['off', 'auto', 'on'].includes(s.settings.noel)) s.settings.noel = 'off'; s.settings.snow = s.settings.snow !== false;
   s.settings.avatar = safeImg(s.settings.avatar); s.settings.avatarSrc = safeImg(s.settings.avatarSrc);
   s.lastLevel = num(s.lastLevel, 1);
 }
@@ -718,6 +720,7 @@ const FAMS = [
   { id: 'pages', group: 'perso', label: 'Pages', icon: 'bookOpen', tiers: [500, 5000, 12000, 30000], unit: 'pages lues', title: 'Rat de bibliothèque', desc: 'Lire des pages de livres.' },
   { id: 'jeux', group: 'perso', label: 'Jeux finis', icon: 'game', tiers: [1, 5, 15, 40], unit: 'jeux terminés', title: 'Gamer', desc: 'Terminer des jeux vidéo.' }
 ];
+FAMS.push({ id: 'noel', group: 'noel', label: 'Films de Noël', icon: 'tree', tiers: [1, 5, 12, 25], unit: 'films de Noël', title: 'Esprit de Noël', desc: 'Voir des films de Noël, en décembre ou toute autre saison.' });
 const FAM = Object.fromEntries(FAMS.map((f) => [f.id, f]));
 const SECRETS = [
   { id: 'triple', label: 'Triple séance', icon: 'reel', desc: 'Voir 3 films dans la même journée.' },
@@ -726,10 +729,11 @@ const SECRETS = [
   { id: 'pile', label: 'Pile à l’heure', icon: 'cal', desc: 'Voir un film le jour de sa sortie.' },
   { id: 'retour', label: 'Retour aux sources', icon: 'redo', desc: 'Reprendre une série après plus de 6 mois d’arrêt.' },
   { id: 'classique', label: 'Séance classique', icon: 'ticket', desc: 'Voir en salle un film sorti il y a plus de 25 ans.' },
-  { id: 'parfait', label: 'Mois parfait', icon: 'target', desc: 'Atteindre tous les objectifs d’un mois.' }
+  { id: 'parfait', label: 'Mois parfait', icon: 'target', desc: 'Atteindre tous les objectifs d’un mois.' },
+  { id: 'veillee', label: 'Veillée de Noël', icon: 'tree', desc: 'Regarder quelque chose le soir du 24 décembre (dès 17 h) ou le 25.' }
 ];
 const SECRET = Object.fromEntries(SECRETS.map((s) => [s.id, s]));
-const GROUPS = [['series', 'Séries'], ['films', 'Films'], ['habits', 'Habitudes'], ['perso', 'Ma version']];
+const GROUPS = [['series', 'Séries'], ['films', 'Films'], ['habits', 'Habitudes'], ['noel', 'Saison de Noël'], ['perso', 'Ma version']];
 const dayOf = (ts) => isoDay(new Date(ts));
 const epWeight = (e) => (e.fmt === 'court' ? 0.5 : 1);
 const seriesEps = (it) => (it && it.seasons ? it.seasons.reduce((a, s) => a + (s.count || 0), 0) : 0);
@@ -747,7 +751,7 @@ function badgeData() {
     const secret = (id, e) => { if (!sec[id]) sec[id] = { ts: e.ts, item: e.item }; };
     const decades = new Set(); const countries = new Set(); const seenItems = new Set(); const rewatched = new Set();
     const dayEps = {}; const dayFilms = {}; const firstEp = {}; const lastEp = {};
-    let n = { episodes: 0, saisons: 0, series: 0, longcours: 0, films: 0, sagas: 0, cine: 0, jour: 0, noct: 0, fidele: 0, matchs: 0, sixers: 0, milan: 0, catch: 0, tomes: 0, livres: 0, pages: 0, jeux: 0 };
+    let n = { episodes: 0, saisons: 0, series: 0, longcours: 0, films: 0, noel: 0, sagas: 0, cine: 0, jour: 0, noct: 0, fidele: 0, matchs: 0, sixers: 0, milan: 0, catch: 0, tomes: 0, livres: 0, pages: 0, jeux: 0 };
     for (const e of evs) {
       if (e.kind === 'badge') continue;
       const it = state.items[e.item]; const real = !e.legacy && !e.capped;
@@ -764,6 +768,7 @@ function badgeData() {
       }
       if (isFilm && !e.rewatch) {
         bump('films', ++n.films, e);
+        if (it && it.noel) bump('noel', ++n.noel, e);
         if (it && +it.year) { decades.add(Math.floor(+it.year / 10)); bump('decennies', decades.size, e); }
       }
       if (isFilm && real) {
@@ -775,6 +780,7 @@ function badgeData() {
         const dt = new Date(e.ts);
         if (dt.getHours() < 5) bump('noctambule', ++n.noct, e);
         if (dt.getMonth() === 11 && dt.getDate() === 31 && dt.getHours() === 23) secret('reveillon', e);
+        if (dt.getMonth() === 11 && (dt.getDate() === 25 || (dt.getDate() === 24 && dt.getHours() >= 17))) secret('veillee', e);
       }
       if ((isEp || isFilm || e.kind === 'tome' || e.kind === 'livre_fin' || e.kind === 'jeu') && !seenItems.has(e.item)) {
         seenItems.add(e.item); if (it && Array.isArray(it.countries)) { it.countries.forEach((c) => countries.add(c)); bump('voyageur', countries.size, e); }
@@ -910,7 +916,7 @@ async function buildFromResult(type, r, opt) {
   if (r.playtime) base.playtime = r.playtime; // jeux : durée moyenne RAWG (heures), sert à l'XP
   if (r.src.api === 'tmdb') {
     if (r.src.kind === 'movie') {
-      try { const d = await tmdb('/movie/' + r.src.id); base.runtime = d.runtime || 0; base.overview = d.overview || base.overview; if (d.backdrop_path) base.backdrop = IMG.backdrop + d.backdrop_path; Object.assign(base, tmdbMeta(d, 'movie')); } catch (e) { /* hors ligne */ }
+      try { const d = await tmdb('/movie/' + r.src.id, { append_to_response: 'keywords' }); base.runtime = d.runtime || 0; base.overview = d.overview || base.overview; if (d.backdrop_path) base.backdrop = IMG.backdrop + d.backdrop_path; Object.assign(base, tmdbMeta(d, 'movie')); } catch (e) { /* hors ligne */ }
       return base;
     }
     const d = await tmdb('/tv/' + r.src.id);
@@ -1006,9 +1012,11 @@ async function autoLinkTmdb(it) {
   } catch (e) { /* on proposera le bouton */ }
 }
 /* Données utiles aux badges : pays d'origine, date de sortie, saga (collection), durée moyenne des épisodes */
+function isNoelFilm(d) { const kw = (d.keywords && (d.keywords.keywords || d.keywords.results)) || []; return kw.some((k) => /christmas|no[eë]l|santa claus/i.test(k.name || '')) || /\b(no[eë]l|christmas)\b/i.test(d.title || ''); }
 function tmdbMeta(d, kind) {
   const countries = [...new Set([].concat(d.origin_country || [], (d.production_countries || []).map((c) => c.iso_3166_1)))].filter((c) => /^[A-Z]{2}$/.test(c)).slice(0, 6);
   const m = { countries, release: String(d.release_date || d.first_air_date || '').slice(0, 10), metaAt: now() };
+  if (kind === 'movie') m.noel = isNoelFilm(d);
   if (kind === 'movie' && d.belongs_to_collection) m.coll = { id: d.belongs_to_collection.id, name: d.belongs_to_collection.name };
   if (kind === 'tv' && d.episode_run_time && d.episode_run_time[0]) m.runtime = d.episode_run_time[0];
   return m;
@@ -1024,9 +1032,9 @@ async function enrichTmdb() {
   if (enrichRun || !(state.settings.tmdbKey || '').trim() || navigator.onLine === false) return;
   enrichRun = true; let changed = false;
   try {
-    const todo = Object.values(state.items).filter((i) => i.src && i.src.api === 'tmdb' && !i.metaAt && (i.src.kind === 'movie' || i.src.kind === 'tv')).slice(0, 30);
+    const todo = Object.values(state.items).filter((i) => i.src && i.src.api === 'tmdb' && (!i.metaAt || (i.src.kind === 'movie' && i.noel === undefined && !i.noelManual)) && (i.src.kind === 'movie' || i.src.kind === 'tv')).slice(0, 30);
     for (const it of todo) {
-      try { const d = await tmdb('/' + it.src.kind + '/' + it.src.id); const m = tmdbMeta(d, it.src.kind); if (it.runtime) delete m.runtime; Object.assign(it, m); changed = true; }
+      try { const d = await tmdb('/' + it.src.kind + '/' + it.src.id, it.src.kind === 'movie' ? { append_to_response: 'keywords' } : undefined); const m = tmdbMeta(d, it.src.kind); if (it.runtime) delete m.runtime; if (it.noelManual) delete m.noel; Object.assign(it, m); changed = true; }
       catch (e) { if (String(e.message).startsWith('NOKEY') || String(e.message).includes('401')) break; it.metaAt = now(); }
       await sleep(400);
     }
@@ -1179,7 +1187,7 @@ function upsertMatch(ev, t) {
    7. Interface : icônes, pictogrammes, affiches, toasts
    ========================================================= */
 const ICONS = {
-  play: 'M8 5v14l11-7z', home: 'M4 10.5L12 4l8 6.5V20h-5.5v-5.5h-5V20H4z', star: 'M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z',
+  play: 'M8 5v14l11-7z', tree: 'M12 3l-5 6h3l-4 5h4l-3 4h10l-3-4h4l-4-5h3z M12 18v3', snow: 'M12 3v18M4.2 7.5l15.6 9M4.2 16.5l15.6-9M9.5 4.5L12 6.5l2.5-2M9.5 19.5L12 17.5l2.5 2', home: 'M4 10.5L12 4l8 6.5V20h-5.5v-5.5h-5V20H4z', star: 'M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z',
   clock: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z M12 7v5l3.5 2', user: 'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8z M4.5 20.5c1.3-3.6 4.2-5.4 7.5-5.4s6.2 1.8 7.5 5.4',
   biblio: 'M7 4h10a3 3 0 0 1 3 3v10a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3z M9 4v16',
   check: 'M5 12.5l4.5 4.5L19 7.5', back: 'M19 12H5M11 6l-6 6 6 6', chevD: 'M6 9l6 6 6-6', chevL: 'M15 6l-6 6 6 6', chevR: 'M9 6l6 6-6 6',
@@ -1447,7 +1455,7 @@ function mcard(it, opts) {
 /* Bouton principal à la première personne : ce que tu déclares en le touchant.
    Rond vide au repos (comme les épisodes de la fiche) ; la coche n'apparaît qu'une fois l'action faite. */
 const RING = '<svg class="ring-ic" aria-hidden="true" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="12" cy="12" r="9"/></svg>';
-const RING_DONE = '<svg class="ring-ic done" aria-hidden="true" width="22" height="22" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10.5" fill="currentColor"/><path d="M7.4 12.4l3.1 3.1 6.1-6.6" stroke="#7FB2FF" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const RING_DONE = '<svg class="ring-ic done" aria-hidden="true" width="22" height="22" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10.5" fill="currentColor"/><path d="M7.4 12.4l3.1 3.1 6.1-6.6" style="stroke:var(--accent-lt)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 const ARROW = '<svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>';
 function doneLabel(it, nx) {
   const sh = shape(it); const one = it.volumes && it.volumes.length === 1;
@@ -1844,14 +1852,14 @@ function frameHtml(size, rank, pct, id, inner) {
     const a = -Math.PI / 2 + (k - ((rank.stars - 1) / 2)) * 0.42; const s = size * 0.075;
     stars += `<path transform="translate(${(cx + r * Math.cos(a) - s).toFixed(1)} ${(cx + r * Math.sin(a) - s).toFixed(1)}) scale(${(s / 12).toFixed(3)})" d="${ICONS.star}" fill="#FFF1C9" stroke="#8A5A12" stroke-width="1.2"/>`;
   }
-  return `<span class="frame${rank.glow ? ' glow' : ''}" style="width:${size}px;height:${size}px"><svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" aria-hidden="true"><defs><linearGradient id="${id}" x1="0" y1="0" x2="1" y2="1">${stops}</linearGradient></defs>${arc}${stars}</svg><span class="face" style="inset:${Math.round(w * 1.6)}px">${inner}</span></span>`;
+  return `<span class="frame${rank.glow ? ' glow' : ''}" style="width:${size}px;height:${size}px"><svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" aria-hidden="true"><defs><linearGradient id="${id}" x1="0" y1="0" x2="1" y2="1">${stops}</linearGradient></defs>${arc}${stars}</svg><span class="face" style="inset:${Math.round(w * 1.6)}px">${inner}</span>${noelActive() ? '<span class="hat" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M5 22C6 10 14 3.5 24 6c-2 3-2 6.5.5 10.5L27.5 22z" fill="#E5484D"/><path d="M5 22C6 14 10 8 16 5.5c-3 4-4 10-3.5 16.5z" fill="#B8262E" opacity=".45"/><rect x="3" y="20" width="26" height="7.5" rx="3.75" fill="#F4F6F8"/><circle cx="25" cy="6" r="3.6" fill="#F4F6F8"/></svg></span>' : ''}</span>`;
 }
 const pipsHtml = (n) => `<span class="pips" aria-label="${n} palier${n > 1 ? 's' : ''} sur 4">${TIERS.map((t, i) => `<i class="${i < n ? 't-' + t : ''}"></i>`).join('')}</span>`;
 function famInfo(f) {
   const v = badgeData().val[f.id]; const n = famTier(f.id); const nextT = f.tiers[n];
   return { v, n, best: n ? TIERS[n - 1] : null, next: nextT, sub: nextT == null ? 'Platine ✓' : fmtNum(Math.min(v, nextT)) + ' / ' + fmtNum(nextT) };
 }
-const famsShown = () => FAMS.filter((f) => f.group !== 'perso' || Object.values(state.items).some((i) => ['livre', 'bd', 'manga', 'jeu'].includes(i.type)) || Object.keys(state.matches).length || state.catchLog.length);
+const famsShown = () => FAMS.filter((f) => (f.group !== 'noel' || noelSeason() || famInfo(f).v > 0) && (f.group !== 'perso' || Object.values(state.items).some((i) => ['livre', 'bd', 'manga', 'jeu'].includes(i.type)) || Object.keys(state.matches).length || state.catchLog.length));
 // le palier le plus proche, pour le « presque ! » du profil
 function nearestTier() {
   let best = null;
@@ -1904,6 +1912,13 @@ function viewProfil() {
   <section class="section" aria-label="Objectifs du mois"><div class="sec-head"><h2 class="h2">Objectifs de ${esc(MONTHS[new Date().getMonth()])}</h2><button class="link" data-a="edit-goals">Modifier</button></div>
     <div class="card pad col" style="gap:16px">${goals.length ? goals.map((g) => `<div class="goal-line"><div class="top">${svgIcon(GI[g.key] || 'target', 18)}<span class="grow">${esc(g.label)}</span><b class="${g.met ? 'met' : ''}">${g.count} <span>/ ${g.target}</span></b></div>${bar(Math.round((g.count / g.target) * 100), 'thick' + (g.met ? ' amber' : ''))}</div>`).join('') : '<span class="muted small">Aucun objectif ce mois-ci.</span>'}
     <span class="small muted">Chaque objectif atteint rapporte ${XP.goal} XP.</span></div></section>
+  <section class="card pad col" style="gap:12px" aria-label="Apparence">
+    <h2 class="h2">Apparence</h2>
+    <div class="row" style="gap:12px;align-items:flex-start"><span class="es-mini">${svgIcon('snow', 20)}</span><span class="col grow" style="gap:2px"><b style="font-size:16px">Mode Noël</b><span class="small muted">Couleurs de fête, neige légère et bonnet sur ton avatar.</span></span></div>
+    <div class="seg" role="group" aria-label="Mode Noël">${[['off', 'Jamais'], ['auto', 'Automatique'], ['on', 'Toujours']].map(([k, l]) => `<button class="${state.settings.noel === k ? 'on' : ''}" data-a="noel-mode" data-v="${k}" aria-pressed="${state.settings.noel === k}">${l}</button>`).join('')}</div>
+    <span class="small muted">Automatique : du 1er décembre au 6 janvier.</span>
+    <label class="toggle"><input type="checkbox" data-change="noel-snow" ${state.settings.snow !== false ? 'checked' : ''}><span class="sw"></span><span class="grow"><b style="font-size:14px">Neige</b></span></label>
+  </section>
   <section class="card pad col" style="gap:12px" id="reglages" aria-label="Réglages">
     <h2 class="h2">Réglages</h2>
     <form class="col" style="gap:12px" data-form="keys">
@@ -1929,14 +1944,14 @@ function viewProfil() {
 }
 
 /* ---------- Collection de badges ---------- */
-const BDG_FILTERS = [['tout', 'Tout'], ['series', 'Séries'], ['films', 'Films'], ['habits', 'Habitudes'], ['sagas', 'Sagas'], ['secrets', 'Secrets'], ['perso', 'Ma version']];
+const BDG_FILTERS = [['tout', 'Tout'], ['series', 'Séries'], ['films', 'Films'], ['habits', 'Habitudes'], ['sagas', 'Sagas'], ['noel', 'Noël'], ['secrets', 'Secrets'], ['perso', 'Ma version']];
 function viewBadges() {
   const f = ui.bdgF || 'tout'; const cnt = badgeCount(); const fams = famsShown();
   const byTier = TIERS.map((t, i) => fams.reduce((a, x) => a + ((state.tiers[x.id] || [])[i] ? 1 : 0), 0));
   const cell = (x) => { const fi = famInfo(x); return `<button class="bcell" data-a="badge-open" data-v="${x.id}">${medalHtml(x.icon, fi.best, 64, x.label + (fi.best ? ', ' + fi.best : ''))}<span class="bl">${esc(x.label)}</span>${pipsHtml(fi.n)}<span class="bs">${esc(fi.sub)}</span></button>`; };
   let h = `<header class="head"><button class="icon-btn" data-a="back" aria-label="Retour">${svgIcon('back', 20)}</button><h1 class="h1 grow">Badges</h1></header>
     <div class="col" style="gap:8px"><span class="row between" style="font-size:14px"><span><b style="font-size:20px">${cnt.won}</b> / ${cnt.total} badges</span><span class="muted small">${byTier.slice().reverse().map((n, k) => n + ' ' + TIERS[3 - k]).join(' · ')}</span></span>${bar(Math.round((cnt.won / cnt.total) * 100), 'thick')}</div>
-    ${chipsHtml(BDG_FILTERS.filter(([k]) => k !== 'perso' || fams.some((x) => x.group === 'perso')), f, 'bdg-type', 'Familles')}`;
+    ${chipsHtml(BDG_FILTERS.filter(([k]) => (k !== 'perso' && k !== 'noel') || fams.some((x) => x.group === k)), f, 'bdg-type', 'Familles')}`;
   for (const [g, label] of GROUPS) {
     if (!(f === 'tout' || f === g)) continue; const list = fams.filter((x) => x.group === g); if (!list.length) continue;
     h += `<section class="section"><span class="field-lab">${esc(label)}</span><div class="bgrid">${list.map(cell).join('')}</div></section>`;
@@ -2039,7 +2054,7 @@ function fsHtml() {
   }
   if (x.t === 'recap') {
     const won = wonList();
-    return `<div class="fs" role="dialog" aria-label="Ta collection est prête"><span class="field-lab" style="color:#7FB2FF">Nouveau dans Rewind</span>${frameHtml(120, R, null, 'rgr', faceInner(40))}
+    return `<div class="fs" role="dialog" aria-label="Ta collection est prête"><span class="field-lab" style="color:var(--accent-lt)">Nouveau dans Rewind</span>${frameHtml(120, R, null, 'rgr', faceInner(40))}
       <h2 class="fs-t">Ta collection est prête</h2><p class="fs-p">Tout ce que tu as déjà regardé compte : tu démarres au rang <b>${esc(R.name)}</b> (niveau ${L.lvl}), avec <b>${won.length} badge${won.length > 1 ? 's' : ''}</b> déjà gagné${won.length > 1 ? 's' : ''}.</p>
       ${won.length ? `<div class="recap-grid">${won.slice(0, 10).map((w) => medalHtml(wonIcon(w), wonTier(w), 46)).join('')}</div>` : ''}
       <span class="small muted">Les badges déjà gagnés n’ajoutent pas d’XP : la suite est à conquérir.</span>
@@ -2618,6 +2633,7 @@ const ACT = {
     openModal('Modifier', `<form class="col" style="gap:12px" data-form="item-edit" data-id="${it.id}">
       <label class="field"><span>Titre</span><input class="input" name="title" value="${esc(it.title)}" required></label>
       ${sh === 'episodes' && it.type !== 'catch' ? formatField(it) : ''}
+      ${sh === 'film' ? `<input type="hidden" name="noelF" value="1"><label class="toggle"><input type="checkbox" name="noel" ${it.noel ? 'checked' : ''}><span class="sw"></span><span class="grow"><b style="font-size:14px">Film de Noël</b><br><span class="small muted">Compte pour le badge Films de Noël.</span></span>${svgIcon('tree', 20)}</label>` : ''}
       ${sh === 'episodes' && !(it.src && it.src.api === 'tmdb') ? `<label class="field"><span>Épisodes par saison</span><input class="input" name="seasons" value="${esc(it.seasons.map((s) => s.count).join(', '))}"></label>` : ''}
       ${sh === 'tomes' || sh === 'livre' ? `<label class="field"><span>Nombre de tomes</span><input class="input" name="tomes" type="number" min="1" max="300" value="${it.volumes.length}"></label>` : ''}
       ${sh === 'livre' ? `<label class="field"><span>Pages par tome</span><input class="input" name="pages" type="number" min="0" value="${esc(it.volumes[0] ? it.volumes[0].pages || '' : '')}"></label>` : ''}
@@ -2663,6 +2679,7 @@ const ACT = {
     // on ne revient en arrière que depuis la fiche (depuis Envies, history.back() quittait la page)
     confirmBox('Supprimer ?', `<b>${esc(it.title)}</b> et tout son historique (et l’XP associée) seront supprimés. C’est définitif.`, 'Supprimer', () => { const fromItem = ui.route === 'item'; deleteItem(it.id); checkUnlocks(true); save(); ui.modal = null; if (fromItem) ACT.back(); else render(); }, true);
   },
+  'noel-mode'(d) { state.settings.noel = d.v; save(); render(); },
   'bib-all'() { ui.biblio.type = 'tout'; location.hash = '#biblio'; },
   'goto-catch'() { ui.biblio.type = 'catch'; location.hash = '#biblio'; },
   'match-seen'(d) { const m = state.matches[d.id]; ui.modal = null; withXp(() => matchSee(m, d.mode)); },
@@ -2964,6 +2981,7 @@ const FORMS = {
     if (fd.has('seasons')) { const c = String(fd.get('seasons')).split(/[,;\s]+/).map(Number).filter((n) => n > 0); if (c.length) it.seasons = c.map((n, i) => Object.assign(it.seasons[i] || { n: i + 1, name: 'Saison ' + (i + 1), eps: null }, { count: n })); }
     if (fd.has('tomes')) { const n = clamp(+fd.get('tomes') || 1, 1, 300); const pages = fd.has('pages') ? +fd.get('pages') || 0 : 0; it.volumes = Array.from({ length: n }, (_, i) => Object.assign({ n: i + 1, pages }, it.volumes[i] || {}, sh === 'livre' && fd.has('pages') ? { pages } : {})); }
     if (sh === 'episodes' || sh === 'tomes' || sh === 'livre') it.ended = !!fd.get('ended');
+    if (fd.has('noelF')) { it.noel = !!fd.get('noel'); it.noelManual = true; }
     if (fd.has('format')) { if (FORMATS[fd.get('format')]) it.format = fd.get('format'); else delete it.format; }
     withXp(() => touched(it)); closeModal();
   }
@@ -2983,8 +3001,36 @@ function finishAdd(data) {
    12. Rendu, routes, événements
    ========================================================= */
 let lastRouteKey = '';
+/* Mode Noël : couleurs de fête, neige et bonnet. « auto » = du 1er décembre au 6 janvier. */
+function noelSeason(d) { d = d || new Date(); return d.getMonth() === 11 || (d.getMonth() === 0 && d.getDate() <= 6); }
+function noelActive() { const m = state.settings.noel; return m === 'on' || (m === 'auto' && noelSeason()); }
+function applyNoel() {
+  const on = noelActive(); const root = document.documentElement;
+  if (on) root.dataset.noel = '1'; else delete root.dataset.noel;
+  let sn = document.getElementById('snow'); const want = on && state.settings.snow !== false;
+  if (want && !sn) {
+    sn = document.createElement('div'); sn.id = 'snow'; sn.setAttribute('aria-hidden', 'true');
+    sn.innerHTML = Array.from({ length: 34 }, (_, i) => { const r = (k) => ((i * 37 + k * 91) % 100) / 100; return `<i style="left:${(r(1) * 100).toFixed(1)}%;--s:${(2 + r(2) * 3.5).toFixed(1)}px;--o:${(0.3 + r(3) * 0.55).toFixed(2)};--d:${(9 + r(4) * 10).toFixed(1)}s;--l:-${(r(5) * 18).toFixed(1)}s;--x:${((r(6) - 0.5) * 60).toFixed(0)}px"></i>`; }).join('');
+    document.body.appendChild(sn);
+  } else if (!want && sn) sn.remove();
+  // guirlande de lumières en haut de l'écran (reconstruite si la largeur change)
+  let g = document.getElementById('garland'); const W = window.innerWidth;
+  if (!on) { if (g) g.remove(); return; }
+  if (g && +g.dataset.w === W) return;
+  if (!g) { g = document.createElement('div'); g.id = 'garland'; g.setAttribute('aria-hidden', 'true'); document.body.appendChild(g); }
+  const segs = Math.max(4, Math.round(W / 65)); const w = W / segs; const cols = ['#FF4D55', '#3FD08A', '#FF4D55', '#FFFFFF']; let wire = ''; let bulbs = ''; let k = 0;
+  for (let i = 0; i < segs; i++) {
+    const x0 = i * w; const x1 = x0 + w; wire += `M${x0.toFixed(1)} 2Q${((x0 + x1) / 2).toFixed(1)} 20 ${x1.toFixed(1)} 2`;
+    for (const t of [0.28, 0.72]) {
+      const y = (1 - t) ** 2 * 2 + 2 * (1 - t) * t * 20 + t * t * 2; const c = cols[k % cols.length];
+      bulbs += `<ellipse cx="${(x0 + w * t).toFixed(1)}" cy="${(y + 5).toFixed(1)}" rx="3.6" ry="5.2" fill="${c}" style="filter:drop-shadow(0 0 5px ${c});animation-delay:-${((k * 0.7) % 2.6).toFixed(1)}s"/>`; k++;
+    }
+  }
+  g.dataset.w = W; g.innerHTML = `<svg width="${W}" height="34" viewBox="0 0 ${W} 34"><path d="${wire}" fill="none" stroke="#1B2A22" stroke-width="1.6"/>${bulbs}</svg>`;
+}
+window.addEventListener('resize', () => { if (typeof state !== 'undefined' && state) applyNoel(); });
 function render() {
-  memoClear();
+  memoClear(); applyNoel();
   const r = parseRoute(); ui.route = r.route; ui.arg = r.arg;
   const key = r.route + ':' + (r.arg || '');
   const sameRoute = key === lastRouteKey; const y = window.scrollY;
@@ -3040,6 +3086,7 @@ document.addEventListener('submit', (e) => {
 document.addEventListener('change', (e) => {
   const el = e.target; const a = el.dataset.change; if (!a) return;
   if (a === 'add-catchup') { ui.add.catchup = el.checked; }
+  if (a === 'noel-snow') { state.settings.snow = el.checked; save(); applyNoel(); }
   if (a === 'cine') { ui.cine = ui.cine || {}; ui.cine[el.dataset.id] = el.checked; }
   if (a === 'poster-file') {
     const file = el.files && el.files[0]; if (!file) return;
