@@ -3,7 +3,7 @@
    sauf les recherches de titres vers TMDB, AniList (manga), Google Books, Open Library, RAWG et TheSportsDB. */
 'use strict';
 
-const APP_VERSION = '3.2.0';
+const APP_VERSION = '3.3.0';
 const DAY = 86400000;
 
 /* =========================================================
@@ -21,9 +21,16 @@ const TYPES = {
 };
 const ADD_TYPES = ['film', 'serie', 'doc', 'livre', 'manga', 'bd', 'jeu', 'sport', 'catch'];
 const XP = { ep: { serie: 10, doc: 10, catch: 25 }, film: 30, tome: 15, jeu: 100, match: 25, matchResume: 5,
-  catchHebdo: 25, catchPPV: 50, catchShow: 35, catchResume: 5, bonusSaison: 50, bonusSerie: 150, bonusSaga: 150, bonusSagaLivre: 300,
+  catchHebdo: 25, catchPPV: 50, catchShow: 35, catchResume: 5, bonusSaison: 50, bonusSaga: 150, bonusSagaLivre: 300,
   goal: 100, livreFin: 25 };
 const RUNTIME = { serie: 42, doc: 50, catch: 120, film: 110 };
+/* Épisodes : l'XP dépend du format de la série (durée moyenne enregistrée à l'ajout, ou choisie à la main).
+   ref = durée de référence, utilisée par le plafond anti-triche. Un film de moins d'1 h prend le format correspondant. */
+const FORMATS = { court: { label: 'Court (25 min ou moins)', xp: 6, ref: 25 }, demi: { label: 'Demi-heure (26 à 35 min)', xp: 8, ref: 35 }, standard: { label: 'Standard (36 à 50 min)', xp: 11, ref: 50 }, long: { label: 'Long (plus de 50 min)', xp: 15, ref: 60 } };
+const fmtOfRuntime = (m) => (!m ? null : m <= 25 ? 'court' : m <= 35 ? 'demi' : m <= 50 ? 'standard' : 'long');
+const epFormat = (item) => (FORMATS[item.format] ? item.format : fmtOfRuntime(item.runtime));
+const CAP_MIN = 16 * 60; // plafond : 16 h de contenu par 24 h
+const CINE_XP = 20; const CINE_MAX_DAY = 4;
 const TEAMS = {
   sixers: { key: 'sixers', name: 'Philadelphia 76ers', short: 'Sixers', abbr: 'PHI', id: '134863', sport: 'nba', league: 'NBA', total: 82, c1: '#1D5FBF', c2: '#E8475F' },
   milan: { key: 'milan', name: 'AC Milan', short: 'Milan', abbr: 'MIL', id: '133667', sport: 'foot', league: 'Serie A', total: 38, c1: '#B3122A', c2: '#151515' }
@@ -80,7 +87,9 @@ const monthKey = (ts) => { const d = new Date(ts); return d.getFullYear() + '-' 
 const monthLabel = (mk) => { const [y, m] = mk.split('-'); const s = MONTHS[+m - 1]; return s[0].toUpperCase() + s.slice(1) + ' ' + y; };
 const fmtDay = (ts) => new Date(ts).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' });
 const fmtDate = (ts) => new Date(ts).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' });
-const fmtMatch = (ts) => { const d = new Date(ts); return d.toLocaleDateString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short' }) + ' · ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()); };
+const hhmm = (ts) => { const d = new Date(ts); return pad2(d.getHours()) + ':' + pad2(d.getMinutes()); };
+const isoDay = (d) => d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+const fmtMatch = (ts) => new Date(ts).toLocaleDateString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short' }) + ' · ' + hhmm(ts);
 const plural = (n, s, p) => n + ' ' + (n > 1 ? (p || s + 's') : s);
 const fmtNum = (n) => Math.round(n).toLocaleString('fr-FR');
 const hashHue = (s) => { let h = 0; for (const c of String(s)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return h % 360; };
@@ -95,9 +104,9 @@ const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
 function freshState() {
   return {
     version: 1, createdAt: now(), demo: false,
-    settings: { tmdbKey: '', rawgKey: '', pseudo: '', avatar: '', avatarSrc: '', goals: { films: 4, tomes: 5, episodes: 0, matchs: 8 }, catchTrialStart: now() },
+    settings: { tmdbKey: '', rawgKey: '', pseudo: '', avatar: '', avatarSrc: '', goals: { films: 4, tomes: 5, episodes: 20, matchs: 8 }, catchTrialStart: now(), title: '', vitrine: [], banner: '' },
     items: {}, events: [], matches: {}, catchLog: [], shows: {}, feds: DEFAULT_FEDS.map((f) => Object.assign({}, f)), goalsByMonth: {}, unlocked: {}, lastLevel: 1,
-    lastExport: null, sportSync: 0, logos: {}, logoTry: {}, catchFeed: {}, catchSync: {}, nba: { ids: { PHI: '134863', BOS: '134860' }, feed: {}, lastRun: 0 }
+    tiers: {}, secrets: {}, colls: {}, v33At: now(), lastExport: null, sportSync: 0, logos: {}, logoTry: {}, catchFeed: {}, catchSync: {}, nba: { ids: { PHI: '134863', BOS: '134860' }, feed: {}, lastRun: 0 }
   };
 }
 let state = freshState();
@@ -198,6 +207,7 @@ async function flushNow() {
   }
 }
 function migrate(s) {
+  const upgrade33 = !!s && !s.v33At; // première ouverture en 3.3.0
   const f = freshState();
   const out = Object.assign(f, s || {});
   out.settings = Object.assign(f.settings, (s && s.settings) || {});
@@ -213,7 +223,71 @@ function migrate(s) {
   mergeAnime(out);
   // V3 : plus de petit commentaire sur les entrées de catch
   out.catchLog.forEach((c) => { delete c.note; });
+  sanitize(out);
+  if (upgrade33) migrate33(out);
   return out;
+}
+/* 3.3.0 : fige les objectifs des mois passés avant de changer les valeurs par défaut (sinon l'XP passée bougerait),
+   active l'objectif de 20 épisodes, et prépare l'écran « Ta collection est prête » */
+function migrate33(s) {
+  const cur = monthKey(now()); const old = Object.assign({}, s.settings.goals);
+  new Set(s.events.map((e) => monthKey(e.ts))).forEach((mk) => { if (mk < cur && !s.goalsByMonth[mk]) s.goalsByMonth[mk] = Object.assign({}, old); });
+  if (!s.settings.goals.episodes) s.settings.goals.episodes = 20;
+  if (s.goalsByMonth[cur] && !s.goalsByMonth[cur].episodes) s.goalsByMonth[cur].episodes = 20;
+  s.v33At = now(); s.recapPending = s.events.length > 0;
+}
+/* Sécurité : une sauvegarde importée (ou modifiée à la main) ne doit pas pouvoir glisser du code dans la page.
+   Les identifiants restent de simples mots, les nombres restent des nombres ; ce qui ne respecte pas ces règles est écarté. */
+const SAFE_ID = /^[A-Za-z0-9_.:-]{1,80}$/;
+const num = (v, d) => { const n = Number(v); return v !== null && v !== '' && isFinite(n) ? n : d; };
+const numOrNull = (v) => num(v, null);
+const isObj = (o) => !!o && typeof o === 'object' && !Array.isArray(o);
+const safeImg = (v) => (typeof v === 'string' && v.startsWith('data:image/') ? v : '');
+function sanitize(s) {
+  for (const k of ['items', 'matches', 'shows', 'goalsByMonth', 'unlocked', 'logos', 'catchFeed', 'tiers', 'secrets', 'colls']) if (!isObj(s[k])) s[k] = {};
+  for (const k of Object.keys(s.tiers)) { if (!FAM[k] || !Array.isArray(s.tiers[k])) { delete s.tiers[k]; continue; } s.tiers[k] = s.tiers[k].slice(0, 4).map((h) => (isObj(h) ? { ts: num(h.ts, now()), item: String(h.item || ''), retro: !!h.retro } : null)); }
+  for (const k of Object.keys(s.secrets)) { const h = s.secrets[k]; if (!SECRET[k] || !isObj(h)) delete s.secrets[k]; else s.secrets[k] = { ts: num(h.ts, now()), item: String(h.item || ''), retro: !!h.retro }; }
+  for (const k of Object.keys(s.colls)) { const c = s.colls[k]; if (!/^\d+$/.test(k) || !isObj(c) || !Array.isArray(c.parts)) { delete s.colls[k]; continue; } c.name = String(c.name || ''); c.at = num(c.at, 0); c.parts = c.parts.filter(isObj).map((x) => ({ id: num(x.id, 0), title: String(x.title || ''), date: /^\d{4}-\d\d-\d\d$/.test(x.date) ? x.date : '', poster: String(x.poster || '') })); }
+  s.v33At = s.v33At == null ? undefined : num(s.v33At, now());
+  s.settings.title = String(s.settings.title || '').slice(0, 40); s.settings.banner = SAFE_ID.test(String(s.settings.banner || '')) ? s.settings.banner : '';
+  s.settings.vitrine = Array.isArray(s.settings.vitrine) ? s.settings.vitrine.filter((k) => FAM[k] || SECRET[String(k).slice(2)]).slice(0, 3) : [];
+  for (const k of ['events', 'catchLog']) if (!Array.isArray(s[k])) s[k] = [];
+  for (const [id, it] of Object.entries(s.items)) {
+    if (!isObj(it) || !SAFE_ID.test(id) || it.id !== id) { delete s.items[id]; continue; }
+    if (!TYPES[it.type]) it.type = Array.isArray(it.seasons) ? 'serie' : 'film';
+    it.title = String(it.title == null ? 'Sans titre' : it.title);
+    for (const k of ['runtime', 'createdAt', 'updatedAt']) it[k] = num(it[k], k === 'runtime' ? 0 : now());
+    if (it.playtime != null) it.playtime = num(it.playtime, 0);
+    if (it.format != null && !FORMATS[it.format]) delete it.format;
+    if (it.countries != null && !Array.isArray(it.countries)) delete it.countries;
+    if (Array.isArray(it.seasons)) it.seasons.forEach((x, i) => { x.n = num(x.n, i + 1); x.count = Math.max(0, Math.floor(num(x.count, 0))); if (Array.isArray(x.eps)) x.eps.forEach((e) => { if (isObj(e)) e.rt = num(e.rt, 0); }); else x.eps = null; });
+    else delete it.seasons;
+    if (Array.isArray(it.volumes)) it.volumes.forEach((v, i) => { v.n = num(v.n, i + 1); v.pages = num(v.pages, 0); }); else delete it.volumes;
+    if (!Array.isArray(it.passes) || !it.passes.length) it.passes = [{ n: 1, start: now(), done: {} }];
+    it.passes.forEach((p, i) => { p.n = num(p.n, i + 1); if (!isObj(p.done)) p.done = {}; });
+    if (it.glow && !(isObj(it.glow) && (it.glow.rgb === null || /^\d{1,3},\d{1,3},\d{1,3}$/.test(it.glow.rgb)))) delete it.glow;
+  }
+  s.events = s.events.filter((e) => isObj(e) && typeof e.item === 'string' && (e.kind !== 'badge' || /^b:([a-z]+:[0-3]|s:[a-z]+)$/.test(e.item) && (FAM[e.item.split(':')[1]] || SECRET[e.item.split(':')[2]])));
+  s.events.forEach((e) => { e.kind = String(e.kind || ''); e.ts = num(e.ts, now()); e.xp = num(e.xp, 0); e.pass = num(e.pass, 1); if (e.rt != null) e.rt = num(e.rt, 0); if (e.cineXp != null) e.cineXp = num(e.cineXp, 0); if (e.fmt != null && !FORMATS[e.fmt]) e.fmt = ''; if (e.pages != null) e.pages = num(e.pages, 0); });
+  for (const [id, m] of Object.entries(s.matches)) {
+    if (!isObj(m) || !SAFE_ID.test(id) || m.id !== id) { delete s.matches[id]; continue; }
+    m.ts = num(m.ts, now()); m.hs = numOrNull(m.hs); m.as = numOrNull(m.as); if (m.team && !TEAMS[m.team]) m.team = null;
+    m.home = String(m.home || ''); m.away = String(m.away || '');
+  }
+  for (const [id, x] of Object.entries(s.shows)) { if (!isObj(x) || !SAFE_ID.test(id) || x.id !== id) delete s.shows[id]; else x.ts = num(x.ts, now()); }
+  s.catchLog = s.catchLog.filter((c) => isObj(c) && SAFE_ID.test(String(c.id)));
+  s.catchLog.forEach((c) => { c.ts = num(c.ts, now()); });
+  for (const fed of Object.keys(s.catchFeed)) s.catchFeed[fed] = Array.isArray(s.catchFeed[fed]) ? s.catchFeed[fed].filter((x) => isObj(x) && SAFE_ID.test(String(x.id))).map((x) => Object.assign(x, { ts: num(x.ts, 0) })) : [];
+  if (isObj(s.nba) && isObj(s.nba.feed)) for (const [id, f] of Object.entries(s.nba.feed)) {
+    if (!isObj(f) || !SAFE_ID.test(id) || f.id !== id || !NBA_BY[f.h] || !NBA_BY[f.a]) { delete s.nba.feed[id]; continue; }
+    f.ts = num(f.ts, 0); f.hs = numOrNull(f.hs); f.as = numOrNull(f.as); f.night = /^\d{4}-\d\d-\d\d$/.test(f.night) ? f.night : nightKey(f.ts);
+  }
+  const g = s.settings.goals; for (const k in g) g[k] = num(g[k], 0);
+  for (const mk of Object.keys(s.goalsByMonth)) { const x = s.goalsByMonth[mk]; if (!isObj(x)) delete s.goalsByMonth[mk]; else for (const k in x) x[k] = num(x[k], 0); }
+  for (const k of Object.keys(s.unlocked)) s.unlocked[k] = num(s.unlocked[k], now());
+  s.settings.pseudo = String(s.settings.pseudo || '').slice(0, 24);
+  s.settings.avatar = safeImg(s.settings.avatar); s.settings.avatarSrc = safeImg(s.settings.avatarSrc);
+  s.lastLevel = num(s.lastLevel, 1);
 }
 /* V3 : la catégorie Anime disparaît. Anime en épisodes → série ; anime en un seul long épisode (film) → film.
    Coches, dates et XP déjà gagnée sont conservées. */
@@ -322,21 +396,21 @@ function countText(item) {
 function nextUnit(item) {
   const pass = curPass(item); const sh = shape(item);
   if (sh === 'episodes') {
-    for (const k of epKeys(item)) if (!pass.done[k]) { const i = epInfo(item, k); return Object.assign({ key: k }, i, { label: (item.seasons.length > 1 ? 'S' + i.s + ' · ' : '') + 'É' + i.e }); }
+    for (const k of epKeys(item)) if (!pass.done[k]) { const i = epInfo(item, k); return Object.assign({ key: k }, i); }
     return null;
   }
-  if (sh === 'tomes') { for (const v of item.volumes) if (!pass.done['t' + v.n]) return { key: 't' + v.n, n: v.n, label: 'Tome ' + v.n }; return null; }
+  if (sh === 'tomes') { for (const v of item.volumes) if (!pass.done['t' + v.n]) return { key: 't' + v.n, n: v.n }; return null; }
   if (sh === 'livre') {
     for (const v of item.volumes) {
       if (pass.done['t' + v.n]) continue;
       const one = item.volumes.length === 1;
-      if (!pass.done['t' + v.n + 'm']) return { key: 't' + v.n + 'm', n: v.n, mid: true, label: one ? 'Moitié du livre' : 'Moitié du tome ' + v.n };
-      return { key: 't' + v.n, n: v.n, label: one ? 'Fin du livre' : 'Fin du tome ' + v.n };
+      if (!pass.done['t' + v.n + 'm']) return { key: 't' + v.n + 'm', n: v.n, mid: true };
+      return { key: 't' + v.n, n: v.n };
     }
     return null;
   }
-  if (sh === 'jeu') return pass.done.fin ? null : { key: 'fin', label: 'Terminé' };
-  return pass.done.v ? null : { key: 'v', label: 'Film' };
+  if (sh === 'jeu') return pass.done.fin ? null : { key: 'fin' };
+  return pass.done.v ? null : { key: 'v' };
 }
 /* ---------- événements (source de l'XP et de l'historique) ---------- */
 function makeEvent(item, key, ts) {
@@ -345,16 +419,35 @@ function makeEvent(item, key, ts) {
   const ev = { id: uid(), ts, item: item.id, pass: pass.n, key, type: item.type, legacy, rewatch, xp: 0, kind: '' };
   if (sh === 'episodes') {
     const i = epInfo(item, key);
-    ev.kind = 'ep'; ev.xp = XP.ep[item.type] || 10; ev.rt = (i && i.rt) || item.runtime || RUNTIME[item.type] || 40;
+    ev.kind = 'ep'; ev.rt = (i && i.rt) || item.runtime || RUNTIME[item.type] || 40;
+    if (item.type === 'catch') ev.xp = XP.ep.catch;
+    else { const f = epFormat(item); ev.fmt = f || ''; ev.xp = f ? FORMATS[f].xp : 10; }
   } else if (sh === 'tomes') { ev.kind = 'tome'; ev.xp = XP.tome; }
   else if (sh === 'livre') {
     const v = volOf(item, key); const total = bookXp(v && v.pages); const mid = Math.round(total * 0.4);
     if (key.endsWith('m')) { ev.kind = 'livre_mi'; ev.xp = mid; }
     else { ev.kind = 'livre_fin'; ev.xp = (pass.done[key + 'm'] ? total - mid : total) + XP.livreFin; ev.pages = (v && v.pages) || 0; }
-  } else if (sh === 'jeu') { ev.kind = 'jeu'; ev.xp = XP.jeu; }
-  else { ev.kind = 'film'; ev.xp = XP.film; ev.rt = item.runtime || RUNTIME.film; }
+  } else if (sh === 'jeu') { ev.kind = 'jeu'; ev.xp = item.playtime ? clamp(Math.round(item.playtime * 12), 100, 600) : XP.jeu; }
+  else {
+    // film : 30 XP quelle que soit sa durée ; moins d'1 h (OAV, court-métrage) = XP du format épisode
+    const f = item.runtime && item.runtime < 60 ? fmtOfRuntime(item.runtime) : null;
+    ev.kind = 'film'; ev.xp = f ? FORMATS[f].xp : XP.film; ev.rt = item.runtime || RUNTIME.film; if (f) { ev.short = true; ev.fmt = f; }
+  }
   if (legacy) ev.xp = 0; else if (rewatch) ev.xp = Math.round(ev.xp / 2);
+  // plafond de vraisemblance : au-delà de 16 h de contenu en 24 h, la séance compte mais sans XP
+  if (!legacy && (ev.kind === 'ep' || ev.kind === 'film') && overCap(ev)) { ev.xp = 0; ev.capped = true; capNotice(); }
   return ev;
+}
+const refMin = (e) => (e.kind === 'film' ? (e.short ? FORMATS[e.fmt].ref : 120) : e.type === 'catch' ? 120 : FORMATS[e.fmt] ? FORMATS[e.fmt].ref : 45);
+function overCap(ev) {
+  let sum = refMin(ev);
+  for (const e of state.events) if ((e.kind === 'ep' || e.kind === 'film') && !e.legacy && !e.capped && e.ts > ev.ts - DAY && e.ts <= ev.ts) sum += refMin(e);
+  return sum > CAP_MIN;
+}
+let capToldAt = 0;
+function capNotice() {
+  if (now() - capToldAt < 60000) return; capToldAt = now();
+  setTimeout(() => toast('Tu as beaucoup regardé en 24 h : ces séances comptent dans ta progression, mais sans XP.', '', 5000), 0);
 }
 function setDone(item, key, on, ts) {
   const pass = curPass(item);
@@ -372,21 +465,45 @@ function checkBonuses(item, ts) {
   const pass = curPass(item); const sh = shape(item); const want = {};
   if (item.type !== 'catch') {
     if (sh === 'episodes') {
-      if (item.seasons.length > 1) item.seasons.forEach((s) => { if (seasonDone(item, s)) want['bonus:s' + s.n] = ['bonus_saison', XP.bonusSaison, s.n]; });
-      if (item.ended && item.seasons.some((s) => s.count) && item.seasons.every((s) => !s.count || seasonDone(item, s))) want['bonus:all'] = ['bonus_serie', XP.bonusSerie];
+      // +50 par saison terminée (toutes les saisons, même pour une série d'une seule saison)
+      item.seasons.forEach((s) => { if (seasonDone(item, s)) want['bonus:s' + s.n] = ['bonus_saison', XP.bonusSaison, s.n, item.seasons.length === 1]; });
+      // série complète : 100 + 1 par épisode, 400 au plus
+      if (item.ended && item.seasons.some((s) => s.count) && item.seasons.every((s) => !s.count || seasonDone(item, s))) want['bonus:all'] = ['bonus_serie', Math.min(400, 100 + seriesEps(item))];
     }
     if ((sh === 'tomes' || sh === 'livre') && item.ended && item.volumes.length > 1 && item.volumes.every((v) => pass.done['t' + v.n])) {
       want['bonus:all'] = ['bonus_saga', sh === 'livre' ? XP.bonusSagaLivre : XP.bonusSaga];
     }
+    if (sh === 'film') sagaBonus(item, ts);
   }
-  state.events = state.events.filter((e) => !(e.item === item.id && e.pass === pass.n && e.kind.startsWith('bonus') && !want[e.key]));
+  state.events = state.events.filter((e) => !(e.item === item.id && e.pass === pass.n && e.kind.startsWith('bonus') && e.kind !== 'bonus_tsaga' && !want[e.key]));
   for (const k in want) {
     if (state.events.some((e) => e.item === item.id && e.pass === pass.n && e.key === k)) continue;
-    const [kind, xp, season] = want[k];
+    const [kind, xp, season, newRule] = want[k];
     const legacy = !!item.catchup; const rewatch = pass.n > 1;
+    // règle ajoutée en 3.3.0 (bonus de saison d'une série à saison unique) : pas d'XP pour une saison finie avant
+    const old = newRule && Object.values(pass.done).every((t) => t < (state.v33At || 0));
     state.events.push({ id: uid(), ts: ts || now(), item: item.id, pass: pass.n, key: k, type: item.type, kind, season,
-      xp: legacy ? 0 : rewatch ? Math.round(xp / 2) : xp, legacy, rewatch });
+      xp: legacy || old ? 0 : rewatch ? Math.round(xp / 2) : xp, legacy, rewatch });
   }
+}
+/* Saga (collection TMDB) : quand tous ses films sortis sont vus, +100 et +20 par film (300 au plus), une seule fois.
+   Le bonus est rangé sur le film qui complète la saga ; il disparaît si la saga redevient incomplète. */
+const filmSeen = (it) => it.passes.some((p) => p.done.v);
+function sagaState(collId) {
+  const c = state.colls && state.colls[collId]; if (!c || !c.parts || !c.parts.length) return null;
+  const today = isoDay(new Date());
+  const parts = c.parts.filter((x) => x.date && x.date <= today);
+  const mine = Object.values(state.items).filter((i) => i.coll && String(i.coll.id) === String(collId) && i.src && i.src.api === 'tmdb');
+  const seen = parts.filter((x) => mine.some((i) => String(i.src.id) === String(x.id) && filmSeen(i)));
+  return { name: c.name, parts, seen, done: parts.length > 1 && seen.length === parts.length };
+}
+function sagaBonus(item, ts) {
+  if (!item.coll) return; const id = String(item.coll.id); const key = 'bonus:saga:' + id;
+  const st = sagaState(id); const has = state.events.find((e) => e.key === key);
+  if (st && st.done && !has) {
+    const legacy = !!item.catchup;
+    state.events.push({ id: uid(), ts: ts || now(), item: item.id, pass: curPass(item).n, key, type: 'film', kind: 'bonus_tsaga', coll: id, xp: legacy ? 0 : Math.min(300, 100 + 20 * st.parts.length), legacy, rewatch: false });
+  } else if (has && (!st || !st.done)) state.events = state.events.filter((e) => e.key !== key);
 }
 function refreshStatus(item) {
   const p = progress(item);
@@ -403,8 +520,11 @@ function markAll(item, ts) {
   else setDone(item, 'v', true, ts);
 }
 function deleteItem(id) {
+  const coll = state.items[id] && state.items[id].coll;
   delete state.items[id];
   state.events = state.events.filter((e) => e.item !== id);
+  // la saga n'est plus complète : son bonus disparaît, même s'il était rangé sur un autre film
+  if (coll) { const st = sagaState(String(coll.id)); if (!st || !st.done) state.events = state.events.filter((e) => e.key !== 'bonus:saga:' + coll.id); }
 }
 
 /* ---------- sport ---------- */
@@ -453,7 +573,6 @@ function guessFed(title) {
   return state.feds.find((f) => f.name.toLowerCase() === g[0].toLowerCase()).name;
 }
 const cleanShowName = (t) => String(t || '').replace(/^(WWE|AEW|NJPW|TNA|ROH|GCW)\s*[:\-–]?\s*/i, '').trim() || t;
-const isoDay = (d) => d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
 const fmtLong = (iso) => new Date(iso + 'T12:00:00').toLocaleDateString('fr-FR', { day: 'numeric', month: 'short', year: 'numeric' });
 async function catchTmdbSearch(q) {
   const r = await tmdb('/search/multi', { query: q, include_adult: 'false' });
@@ -544,68 +663,179 @@ function activeMonths() {
   return memo('am', () => { const set = new Set(Object.keys(eventsByMonth())); set.add(monthKey(now())); return [...set].sort().reverse(); });
 }
 function totalXp() { return memo('xp', () => activeMonths().reduce((a, mk) => a + monthXp(mk), 0)); }
-const xpForLevel = (n) => 50 * n * (n - 1);
-const levelOf = (xp) => Math.max(1, Math.floor((1 + Math.sqrt(1 + xp / 12.5)) / 2));
+/* ---------- niveaux (100) et rangs ---------- */
+// courbe douce : le niveau 100 se gagne en ~8 ans au rythme moyen (~700 XP / mois)
+const LEVEL_MAX = 100;
+const xpForLevel = (n) => (n <= 1 ? 0 : Math.round(163 * Math.pow(n - 1, 1.31)));
+function levelOf(xp) { let n = 1; while (n < LEVEL_MAX && xp >= xpForLevel(n + 1)) n++; return n; }
 function levelInfo() {
   const xp = totalXp(); const lvl = levelOf(xp);
+  if (lvl >= LEVEL_MAX) return { xp, lvl, into: xp - xpForLevel(lvl), need: 0, pct: 100, max: true };
   const base = xpForLevel(lvl); const next = xpForLevel(lvl + 1);
   return { xp, lvl, into: xp - base, need: next - base, pct: Math.round(((xp - base) / (next - base)) * 100) };
 }
-const BADGES = [
-  { id: 'saison', label: 'Saison terminée', icon: 'layers', f: (c) => c.nth((e) => e.kind === 'bonus_saison', 1) },
-  { id: 'serie', label: 'Série complète', icon: 'tv', f: (c) => c.nth((e) => e.kind === 'bonus_serie', 1) },
-  { id: 'saga', label: 'Saga complète', icon: 'star', f: (c) => c.nth((e) => e.kind === 'bonus_saga', 1) },
-  { id: 'ep100', label: '100 épisodes', icon: 'play', f: (c) => c.nth((e) => e.kind === 'ep' && e.type !== 'catch', 100) },
-  { id: 'ep500', label: '500 épisodes', icon: 'play', f: (c) => c.nth((e) => e.kind === 'ep' && e.type !== 'catch', 500) },
-  { id: 'films10', label: '10 films', icon: 'reel', f: (c) => c.nth((e) => e.kind === 'film', 10) },
-  { id: 'films50', label: '50 films', icon: 'reel', f: (c) => c.nth((e) => e.kind === 'film', 50) },
-  { id: 'livre1', label: 'Premier livre', icon: 'bookOpen', f: (c) => c.nth((e) => e.kind === 'livre_fin', 1) },
-  { id: 'livres10', label: '10 livres', icon: 'bookOpen', f: (c) => c.nth((e) => e.kind === 'livre_fin', 10) },
-  { id: 'pages1000', label: '1 000 pages', icon: 'bookOpen', f: (c) => c.cumul((e) => (e.kind === 'livre_fin' ? e.pages || 0 : 0), 1000) },
-  { id: 'tomes25', label: '25 tomes', icon: 'layers', f: (c) => c.nth((e) => e.kind === 'tome', 25) },
-  { id: 'jeu1', label: 'Premier jeu fini', icon: 'game', f: (c) => c.nth((e) => e.kind === 'jeu', 1) },
-  { id: 'jeux5', label: '5 jeux finis', icon: 'game', f: (c) => c.nth((e) => e.kind === 'jeu', 5) },
-  { id: 'match10', label: '10 matchs', icon: 'ball', f: (c) => c.nth((e) => e.kind === 'match', 10) },
-  { id: 'sixers20', label: '20 matchs des Sixers', icon: 'ball', f: (c) => c.nth((e) => e.kind === 'match' && e.team === 'sixers', 20) },
-  { id: 'milan20', label: '20 matchs du Milan', icon: 'ball', f: (c) => c.nth((e) => e.kind === 'match' && e.team === 'milan', 20) },
-  { id: 'catch10', label: '10 shows de catch', icon: 'belt', f: (c) => c.nth((e) => e.kind === 'catch' || (e.kind === 'ep' && e.type === 'catch'), 10) },
-  { id: 'revoir', label: 'Premier revisionnage', icon: 'redo', f: (c) => c.nth((e) => e.rewatch && !isBonus(e), 1) },
-  { id: 'mois', label: 'Mois parfait', icon: 'target', f: (c) => c.perfectMonth() },
-  { id: 'niv5', label: 'Niveau 5', icon: 'star', f: (c) => (c.lvl >= 5 ? c.last : null) },
-  { id: 'niv10', label: 'Niveau 10', icon: 'star', f: (c) => (c.lvl >= 10 ? c.last : null) }
+// 8 rangs de cinéma ; chacun débloque un cadre d'avatar (couleurs du dégradé, étoiles, éclat)
+const RANKS = [
+  { id: 'figurant', name: 'Figurant', lvl: 1, c: ['#5B9BFF', '#7C6BFF'], frame: 'Anneau bleu' },
+  { id: 'second', name: 'Second rôle', lvl: 5, c: ['#E0A877', '#8A5530'], frame: 'Cadre bronze' },
+  { id: 'premier', name: 'Premier rôle', lvl: 12, c: ['#F2F5F8', '#8C99A8'], frame: 'Cadre argent' },
+  { id: 'tete', name: 'Tête d’affiche', lvl: 20, c: ['#FFE2A6', '#C8892E'], frame: 'Cadre or' },
+  { id: 'scenariste', name: 'Scénariste', lvl: 35, c: ['#FFE2A6', '#C8892E'], frame: 'Cadre or étoilé', stars: 2 },
+  { id: 'realisateur', name: 'Réalisateur', lvl: 50, c: ['#DDE8FF', '#7C6BFF'], frame: 'Cadre platine' },
+  { id: 'producteur', name: 'Producteur', lvl: 75, c: ['#7FE3FF', '#B07CFF', '#FF8AC8'], frame: 'Cadre holographique' },
+  { id: 'legende', name: 'Légende', lvl: 100, c: ['#FFF1C9', '#EDB965', '#FF8A5B'], frame: 'Cadre or lumineux', glow: true }
 ];
-function badgeCtx() {
-  const evs = realEvents().slice().sort((a, b) => a.ts - b.ts);
-  return {
-    lvl: levelOf(totalXp()), last: evs.length ? evs[evs.length - 1].ts : now(),
-    nth(fn, n) { let i = 0; for (const e of evs) if (fn(e) && ++i >= n) return e.ts; return null; },
-    cumul(fn, n) { let s = 0; for (const e of evs) { s += fn(e); if (s >= n) return e.ts; } return null; },
-    perfectMonth() {
-      for (const mk of activeMonths().slice().reverse()) {
-        const r = goalResults(mk); if (r.length && r.every((g) => g.met)) {
-          const m = evs.filter((e) => monthKey(e.ts) === mk); return m.length ? m[m.length - 1].ts : now();
+const rankOf = (lvl) => RANKS.filter((r) => lvl >= r.lvl).pop();
+const nextRank = (lvl) => RANKS.find((r) => r.lvl > lvl) || null;
+
+/* ---------- badges à paliers ---------- */
+const TIERS = ['bronze', 'argent', 'or', 'platine'];
+const TIER_LABEL = { bronze: 'Bronze', argent: 'Argent', or: 'Or', platine: 'Platine' };
+const TIER_XP = [25, 50, 100, 300];
+const SECRET_XP = 100;
+// paliers réglés pour tomber vers les niveaux 5 / 25 / 50 / 100 au rythme moyen ; title = titre débloqué par l'or
+const FAMS = [
+  { id: 'episodes', group: 'series', label: 'Épisodes', icon: 'tv', tiers: [50, 500, 1000, 2500], unit: 'épisodes vus', title: 'Sériephile', desc: 'Regarder des épisodes de séries et de docus.' },
+  { id: 'saisons', group: 'series', label: 'Saisons finies', icon: 'layers', tiers: [3, 30, 75, 200], unit: 'saisons terminées', title: 'Bingeur', desc: 'Terminer des saisons entières.' },
+  { id: 'series', group: 'series', label: 'Séries complètes', icon: 'trophy', tiers: [1, 5, 15, 40], unit: 'séries terminées', title: 'Finisseur', desc: 'Terminer une série jusqu’au dernier épisode.' },
+  { id: 'longcours', group: 'series', label: 'Long cours', icon: 'inf', tiers: [1, 2, 4, 8], unit: 'séries de plus de 100 épisodes', title: 'Endurant', desc: 'Terminer une série de plus de 100 épisodes.' },
+  { id: 'films', group: 'films', label: 'Films vus', icon: 'reel', tiers: [5, 50, 150, 400], unit: 'films vus', title: 'Cinévore', desc: 'Voir des films (les revisionnages ne comptent pas).' },
+  { id: 'revoir', group: 'films', label: 'Revisionnage', icon: 'redo', tiers: [1, 5, 10, 25], unit: 'œuvres revues', title: 'Nostalgique', desc: 'Revoir ou relire une œuvre déjà terminée.' },
+  { id: 'decennies', group: 'films', label: 'Décennies', icon: 'clock', tiers: [3, 5, 7, 10], unit: 'décennies de cinéma', title: 'Archiviste', desc: 'Voir des films de décennies différentes.' },
+  { id: 'voyageur', group: 'films', label: 'Voyageur', icon: 'globe', tiers: [3, 10, 20, 40], unit: 'pays d’origine', title: 'Globe-trotter', desc: 'Regarder des œuvres venues de pays différents.' },
+  { id: 'cinephile', group: 'films', label: 'Cinéphile', icon: 'ticket', tiers: [1, 10, 25, 60], unit: 'séances en salle', title: 'Cinéphile', desc: 'Voir des films au cinéma.' },
+  { id: 'sagas', group: 'films', label: 'Sagas', icon: 'star', tiers: [1, 3, 6, 15], unit: 'sagas complètes', title: 'Collectionneur', desc: 'Voir tous les films d’une saga (collections TMDB).' },
+  { id: 'marathon', group: 'habits', label: 'Marathon', icon: 'bolt', tiers: [5, 8, 12, 20], unit: 'épisodes dans la journée (record)', title: 'Marathonien', desc: 'Regarder beaucoup d’épisodes dans la même journée. Un épisode de moins de 25 min compte pour ½.' },
+  { id: 'jourmeme', group: 'habits', label: 'Le jour même', icon: 'cal', tiers: [1, 15, 35, 100], unit: 'épisodes vus le jour de leur diffusion', title: 'Toujours à l’heure', desc: 'Regarder un épisode le jour de sa diffusion.' },
+  { id: 'noctambule', group: 'habits', label: 'Noctambule', icon: 'moon', tiers: [1, 30, 75, 200], unit: 'séances entre minuit et 5 h', title: 'Noctambule', desc: 'Regarder un épisode ou un film entre minuit et 5 h.' },
+  { id: 'fidele', group: 'habits', label: 'Fidèle', icon: 'heart', tiers: [1, 2, 4, 10], unit: 'séries finies plus d’un an après leur début', title: 'Fidèle', desc: 'Terminer une série commencée plus d’un an avant.' },
+  { id: 'matchs', group: 'perso', label: 'Matchs', icon: 'ball', tiers: [10, 100, 300, 750], unit: 'matchs regardés', title: 'Supporter', desc: 'Regarder des matchs.' },
+  { id: 'sixers', group: 'perso', label: 'Sixers', icon: 'ball', tiers: [5, 50, 150, 400], unit: 'matchs des Sixers', title: 'Trust the Process', desc: 'Regarder des matchs des Philadelphia 76ers.' },
+  { id: 'milan', group: 'perso', label: 'Milan', icon: 'ball', tiers: [3, 30, 75, 200], unit: 'matchs du Milan', title: 'Rossonero', desc: 'Regarder des matchs du Milan AC.' },
+  { id: 'catch', group: 'perso', label: 'Catch', icon: 'belt', tiers: [10, 75, 200, 500], unit: 'shows de catch', title: 'Ringside', desc: 'Regarder des shows de catch.' },
+  { id: 'tomes', group: 'perso', label: 'Tomes', icon: 'volume', tiers: [5, 75, 200, 500], unit: 'tomes lus', title: 'Bédéphile', desc: 'Lire des tomes de BD et de manga.' },
+  { id: 'livres', group: 'perso', label: 'Livres', icon: 'bookOpen', tiers: [1, 15, 40, 100], unit: 'livres finis', title: 'Lecteur', desc: 'Finir des livres.' },
+  { id: 'pages', group: 'perso', label: 'Pages', icon: 'bookOpen', tiers: [500, 5000, 12000, 30000], unit: 'pages lues', title: 'Rat de bibliothèque', desc: 'Lire des pages de livres.' },
+  { id: 'jeux', group: 'perso', label: 'Jeux finis', icon: 'game', tiers: [1, 5, 15, 40], unit: 'jeux terminés', title: 'Gamer', desc: 'Terminer des jeux vidéo.' }
+];
+const FAM = Object.fromEntries(FAMS.map((f) => [f.id, f]));
+const SECRETS = [
+  { id: 'triple', label: 'Triple séance', icon: 'reel', desc: 'Voir 3 films dans la même journée.' },
+  { id: 'integrale', label: 'Intégrale', icon: 'trophy', desc: 'Regarder une série entière en moins de 7 jours.' },
+  { id: 'reveillon', label: 'Réveillon', icon: 'star', desc: 'Regarder quelque chose le 31 décembre après 23 h.' },
+  { id: 'pile', label: 'Pile à l’heure', icon: 'cal', desc: 'Voir un film le jour de sa sortie.' },
+  { id: 'retour', label: 'Retour aux sources', icon: 'redo', desc: 'Reprendre une série après plus de 6 mois d’arrêt.' },
+  { id: 'classique', label: 'Séance classique', icon: 'ticket', desc: 'Voir en salle un film sorti il y a plus de 25 ans.' },
+  { id: 'parfait', label: 'Mois parfait', icon: 'target', desc: 'Atteindre tous les objectifs d’un mois.' }
+];
+const SECRET = Object.fromEntries(SECRETS.map((s) => [s.id, s]));
+const GROUPS = [['series', 'Séries'], ['films', 'Films'], ['habits', 'Habitudes'], ['perso', 'Ma version']];
+const dayOf = (ts) => isoDay(new Date(ts));
+const epWeight = (e) => (e.fmt === 'court' ? 0.5 : 1);
+const seriesEps = (it) => (it && it.seasons ? it.seasons.reduce((a, s) => a + (s.count || 0), 0) : 0);
+/* Un seul passage chronologique sur les événements. Les badges de collection comptent aussi le rattrapage ;
+   les badges d'habitudes et les secrets ne comptent que les vraies séances (ni rattrapage, ni surplus du plafond). */
+function badgeData() {
+  return memo('bdg', () => {
+    const evs = state.events.slice().sort((a, b) => a.ts - b.ts);
+    const val = {}; const hits = {}; const sec = {};
+    FAMS.forEach((f) => { val[f.id] = 0; hits[f.id] = []; });
+    const bump = (fid, v, e) => {
+      const f = FAM[fid]; if (v <= val[fid]) return; val[fid] = v;
+      f.tiers.forEach((t, i) => { if (v >= t && !hits[fid][i]) hits[fid][i] = { ts: e.ts, item: e.item }; });
+    };
+    const secret = (id, e) => { if (!sec[id]) sec[id] = { ts: e.ts, item: e.item }; };
+    const decades = new Set(); const countries = new Set(); const seenItems = new Set(); const rewatched = new Set();
+    const dayEps = {}; const dayFilms = {}; const firstEp = {}; const lastEp = {};
+    let n = { episodes: 0, saisons: 0, series: 0, longcours: 0, films: 0, sagas: 0, cine: 0, jour: 0, noct: 0, fidele: 0, matchs: 0, sixers: 0, milan: 0, catch: 0, tomes: 0, livres: 0, pages: 0, jeux: 0 };
+    for (const e of evs) {
+      if (e.kind === 'badge') continue;
+      const it = state.items[e.item]; const real = !e.legacy && !e.capped;
+      const isEp = e.kind === 'ep' && e.type !== 'catch'; const isFilm = e.kind === 'film';
+      if (isEp) {
+        bump('episodes', ++n.episodes, e);
+        if (real) {
+          const d = dayOf(e.ts); dayEps[d] = (dayEps[d] || 0) + epWeight(e); bump('marathon', dayEps[d], e);
+          const inf = it && epInfo(it, e.key); const ep = inf && inf.season && inf.season.eps && inf.season.eps[inf.e - 1];
+          if (ep && ep.air && ep.air === d) bump('jourmeme', ++n.jour, e);
+          if (lastEp[e.item] && e.ts - lastEp[e.item] > 180 * DAY) secret('retour', e);
         }
+        if (!firstEp[e.item]) firstEp[e.item] = e.ts; lastEp[e.item] = e.ts;
       }
-      return null;
+      if (isFilm && !e.rewatch) {
+        bump('films', ++n.films, e);
+        if (it && +it.year) { decades.add(Math.floor(+it.year / 10)); bump('decennies', decades.size, e); }
+      }
+      if (isFilm && real) {
+        const d = dayOf(e.ts); if (!e.short) { dayFilms[d] = (dayFilms[d] || 0) + 1; if (dayFilms[d] >= 3) secret('triple', e); }
+        if (e.cine) { bump('cinephile', ++n.cine, e); if (it && +it.year && +it.year <= new Date(e.ts).getFullYear() - 25) secret('classique', e); }
+        if (it && it.release && it.release === d) secret('pile', e);
+      }
+      if ((isEp || isFilm) && real) {
+        const dt = new Date(e.ts);
+        if (dt.getHours() < 5) bump('noctambule', ++n.noct, e);
+        if (dt.getMonth() === 11 && dt.getDate() === 31 && dt.getHours() === 23) secret('reveillon', e);
+      }
+      if ((isEp || isFilm || e.kind === 'tome' || e.kind === 'livre_fin' || e.kind === 'jeu') && !seenItems.has(e.item)) {
+        seenItems.add(e.item); if (it && Array.isArray(it.countries)) { it.countries.forEach((c) => countries.add(c)); bump('voyageur', countries.size, e); }
+      }
+      if (e.rewatch && !e.kind.startsWith('bonus')) { const k = e.item + ':' + e.pass; if (!rewatched.has(k)) { rewatched.add(k); bump('revoir', rewatched.size, e); } }
+      if (e.kind === 'bonus_saison') bump('saisons', ++n.saisons, e);
+      if (e.kind === 'bonus_serie') {
+        bump('series', ++n.series, e);
+        if (seriesEps(it) >= 100) bump('longcours', ++n.longcours, e);
+        if (real && firstEp[e.item] && e.ts - firstEp[e.item] >= 365 * DAY) bump('fidele', ++n.fidele, e);
+        if (real && firstEp[e.item] && e.ts - firstEp[e.item] <= 7 * DAY && !state.events.some((x) => x.item === e.item && x.kind === 'ep' && (x.legacy || x.capped))) secret('integrale', e);
+      }
+      if (e.kind === 'bonus_tsaga') bump('sagas', ++n.sagas, e);
+      if (e.kind === 'match') { bump('matchs', ++n.matchs, e); if (e.team === 'sixers') bump('sixers', ++n.sixers, e); if (e.team === 'milan') bump('milan', ++n.milan, e); }
+      if (e.kind === 'catch' || (e.kind === 'ep' && e.type === 'catch')) bump('catch', ++n.catch, e);
+      if (e.kind === 'tome') bump('tomes', ++n.tomes, e);
+      if (e.kind === 'livre_fin') { bump('livres', ++n.livres, e); n.pages += e.pages || 0; bump('pages', n.pages, e); }
+      if (e.kind === 'jeu') bump('jeux', ++n.jeux, e);
     }
-  };
+    // mois parfait : un mois terminé (ou le mois en cours) où tous les objectifs sont atteints
+    for (const mk of activeMonths().slice().reverse()) {
+      const r = goalResults(mk); if (r.length && r.every((g) => g.met)) { const m = (eventsByMonth()[mk] || []); const last = m[m.length - 1]; secret('parfait', { ts: last ? last.ts : now(), item: '' }); break; }
+    }
+    return { val, hits, sec };
+  });
 }
-function badgeStates() {
-  const list = memo('bs', () => { const c = badgeCtx(); return BADGES.map((b) => { const ts = b.f(c); return { id: b.id, won: !!ts, ts }; }); });
-  return list.map((x, i) => Object.assign({}, BADGES[i], { won: x.won, ts: state.unlocked[x.id] || x.ts }));
+// paliers obtenus d'une famille (0 à 4) et meilleur palier
+const famTier = (fid) => (state.tiers[fid] || []).filter(Boolean).length;
+function badgeCount() {
+  const fams = famsShown(); const tiers = fams.reduce((a, f) => a + famTier(f.id), 0); const sec = Object.keys(state.secrets || {}).length;
+  return { won: tiers + sec, total: fams.length * 4 + SECRETS.length, sec };
 }
+/* Attribution : chaque palier atteint rapporte son XP une seule fois (événement « badge »).
+   Un palier atteint avant la 3.3.0, ou découvert après coup pour une séance ancienne, entre dans la collection sans XP. */
+function badgeEvent(id, xp, ts) { return { id: uid(), ts, item: 'b:' + id, key: 'badge', kind: 'badge', type: 'badge', xp, legacy: false, rewatch: false }; }
 function checkUnlocks(silent) {
-  const out = [];
-  for (const b of badgeStates()) {
-    if (b.won && !state.unlocked[b.id]) { state.unlocked[b.id] = b.ts || now(); out.push(b); }
-    if (!b.won && state.unlocked[b.id]) delete state.unlocked[b.id];
+  const d = badgeData(); const fresh = []; const cutoff = state.v33At || now();
+  state.tiers = state.tiers || {}; state.secrets = state.secrets || {};
+  for (const f of FAMS) {
+    const have = state.tiers[f.id] || (state.tiers[f.id] = []);
+    f.tiers.forEach((t, i) => {
+      const h = d.hits[f.id][i];
+      if (h && !have[i]) {
+        const retro = silent || h.ts < cutoff;
+        have[i] = { ts: retro ? h.ts : now(), item: h.item, retro };
+        if (!retro) { state.events.push(badgeEvent(f.id + ':' + i, TIER_XP[i], now())); fresh.push({ fam: f.id, i }); }
+      } else if (!h && have[i]) { have[i] = null; state.events = state.events.filter((e) => e.item !== 'b:' + f.id + ':' + i); }
+    });
   }
-  const lvl = levelOf(totalXp());
-  if (!silent) {
-    if (lvl > state.lastLevel) toast(`${svgIcon('star', 22, true)}<span>Niveau ${lvl} atteint !</span>`, 'gold', 3600);
-    out.forEach((b) => toast(`<span class="medal">${svgIcon(b.icon, 16)}</span><span>Badge débloqué : <b>${esc(b.label)}</b></span>`, 'gold', 3600));
+  for (const s of SECRETS) {
+    const h = d.sec[s.id];
+    if (h && !state.secrets[s.id]) {
+      const retro = silent || h.ts < cutoff; state.secrets[s.id] = { ts: retro ? h.ts : now(), item: h.item, retro };
+      if (!retro) { state.events.push(badgeEvent('s:' + s.id, SECRET_XP, now())); fresh.push({ secret: s.id }); }
+    } else if (!h && state.secrets[s.id]) { delete state.secrets[s.id]; state.events = state.events.filter((e) => e.item !== 'b:s:' + s.id); }
   }
+  memoClear();
+  const lvl = levelOf(totalXp()); const before = state.lastLevel || lvl;
+  const rankUp = !silent && rankOf(lvl).lvl > rankOf(before).lvl ? rankOf(lvl) : null;
   state.lastLevel = lvl;
+  if (!silent) celebrate(fresh, rankUp);
 }
 
 /* =========================================================
@@ -671,15 +901,16 @@ async function search(type, q) {
   if (type === 'jeu') {
     const key = (state.settings.rawgKey || '').trim(); if (!key) throw new Error('NOKEY_RAWG');
     const r = await getJSON('https://api.rawg.io/api/games?page_size=15&key=' + encodeURIComponent(key) + '&search=' + encodeURIComponent(q));
-    return (r.results || []).map((g) => ({ src: { api: 'rawg', id: g.id }, title: g.name, year: (g.released || '').slice(0, 4), poster: g.background_image || '', backdrop: g.background_image || '', sub: (g.platforms || []).slice(0, 3).map((p) => p.platform.name).join(', ') }));
+    return (r.results || []).map((g) => ({ src: { api: 'rawg', id: g.id }, title: g.name, year: (g.released || '').slice(0, 4), poster: g.background_image || '', backdrop: g.background_image || '', sub: (g.platforms || []).slice(0, 3).map((p) => p.platform.name).join(', '), playtime: g.playtime || 0 }));
   }
   return [];
 }
 async function buildFromResult(type, r, opt) {
   const base = { type, title: r.title, year: r.year, poster: r.poster, backdrop: r.backdrop || '', subtitle: r.sub || '', src: r.src, overview: r.overview || '' };
+  if (r.playtime) base.playtime = r.playtime; // jeux : durée moyenne RAWG (heures), sert à l'XP
   if (r.src.api === 'tmdb') {
     if (r.src.kind === 'movie') {
-      try { const d = await tmdb('/movie/' + r.src.id); base.runtime = d.runtime || 0; base.overview = d.overview || base.overview; if (d.backdrop_path) base.backdrop = IMG.backdrop + d.backdrop_path; } catch (e) { /* hors ligne */ }
+      try { const d = await tmdb('/movie/' + r.src.id); base.runtime = d.runtime || 0; base.overview = d.overview || base.overview; if (d.backdrop_path) base.backdrop = IMG.backdrop + d.backdrop_path; Object.assign(base, tmdbMeta(d, 'movie')); } catch (e) { /* hors ligne */ }
       return base;
     }
     const d = await tmdb('/tv/' + r.src.id);
@@ -688,7 +919,7 @@ async function buildFromResult(type, r, opt) {
     base.ended = d.status === 'Ended' || d.status === 'Canceled';
     base.runtime = (d.episode_run_time && d.episode_run_time[0]) || 0;
     if (d.backdrop_path) base.backdrop = IMG.backdrop + d.backdrop_path;
-    base.overview = d.overview || base.overview; base.syncedAt = now();
+    base.overview = d.overview || base.overview; base.syncedAt = now(); Object.assign(base, tmdbMeta(d, 'tv'));
     return base;
   }
   if (type === 'manga' || type === 'bd' || type === 'livre') {
@@ -773,6 +1004,36 @@ async function autoLinkTmdb(it) {
     const c = await tmdbTvCandidates([it.title].concat(it.altTitles || []), it.year);
     if (c[0] && c[0].score >= 8) { await linkTmdb(it, c[0].x.id); save(); render(); toast('Titres et miniatures récupérés sur TMDB', 'gold', 2400); }
   } catch (e) { /* on proposera le bouton */ }
+}
+/* Données utiles aux badges : pays d'origine, date de sortie, saga (collection), durée moyenne des épisodes */
+function tmdbMeta(d, kind) {
+  const countries = [...new Set([].concat(d.origin_country || [], (d.production_countries || []).map((c) => c.iso_3166_1)))].filter((c) => /^[A-Z]{2}$/.test(c)).slice(0, 6);
+  const m = { countries, release: String(d.release_date || d.first_air_date || '').slice(0, 10), metaAt: now() };
+  if (kind === 'movie' && d.belongs_to_collection) m.coll = { id: d.belongs_to_collection.id, name: d.belongs_to_collection.name };
+  if (kind === 'tv' && d.episode_run_time && d.episode_run_time[0]) m.runtime = d.episode_run_time[0];
+  return m;
+}
+async function loadColl(id) {
+  state.colls = state.colls || {};
+  const c = await tmdb('/collection/' + id);
+  state.colls[id] = { name: c.name || '', parts: (c.parts || []).map((x) => ({ id: x.id, title: x.title || x.name || '', date: x.release_date || '', poster: x.poster_path ? IMG.poster + x.poster_path : '' })), at: now() };
+}
+/* Complète en arrière-plan les œuvres TMDB déjà enregistrées (au plus 30 par passage, une requête toutes les 0,4 s) */
+let enrichRun = false;
+async function enrichTmdb() {
+  if (enrichRun || !(state.settings.tmdbKey || '').trim() || navigator.onLine === false) return;
+  enrichRun = true; let changed = false;
+  try {
+    const todo = Object.values(state.items).filter((i) => i.src && i.src.api === 'tmdb' && !i.metaAt && (i.src.kind === 'movie' || i.src.kind === 'tv')).slice(0, 30);
+    for (const it of todo) {
+      try { const d = await tmdb('/' + it.src.kind + '/' + it.src.id); const m = tmdbMeta(d, it.src.kind); if (it.runtime) delete m.runtime; Object.assign(it, m); changed = true; }
+      catch (e) { if (String(e.message).startsWith('NOKEY') || String(e.message).includes('401')) break; it.metaAt = now(); }
+      await sleep(400);
+    }
+    const colls = [...new Set(Object.values(state.items).filter((i) => i.coll).map((i) => String(i.coll.id)))].filter((id) => !state.colls || !state.colls[id] || now() - state.colls[id].at > 30 * DAY);
+    for (const id of colls.slice(0, 10)) { try { await loadColl(id); changed = true; } catch (e) { /* plus tard */ } await sleep(400); }
+    if (changed) { Object.values(state.items).filter((i) => i.coll && shape(i) === 'film').forEach((i) => sagaBonus(i)); checkUnlocks(); save(); if (['profil', 'badges', 'item'].includes(ui.route)) render(); else renderFs(); }
+  } finally { enrichRun = false; }
 }
 async function refreshTv(item) {
   const d = await tmdb('/tv/' + item.src.id);
@@ -939,6 +1200,10 @@ const ICONS = {
   volume: 'M6 3.5h10.5A1.5 1.5 0 0 1 18 5v15.5H7.5A1.5 1.5 0 0 1 6 19z M6 17h12 M10 7.5h5',
   game: 'M8 7.5h8a5 5 0 0 1 0 10H8a5 5 0 0 1 0-10z M8 10.5v4 M6 12.5h4 M15.5 11.5h.01 M17.5 13.5h.01',
   ball: 'M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17z M3.5 12h17 M12 3.5c2.6 2.4 2.6 14.6 0 17 M12 3.5c-2.6 2.4-2.6 14.6 0 17',
+  bolt: 'M13 3L5 13h6l-1 8 8-10h-6z', moon: 'M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z', cal: 'M4 6h16v14H4z M4 10h16 M8 3v4 M16 3v4 M10 14l2 2 3-3',
+  globe: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z M3 12h18 M12 3c2.5 2.6 2.5 15.4 0 18 M12 3c-2.5 2.6-2.5 15.4 0 18', heart: 'M12 20s-7-4.4-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.6-7 10-7 10z',
+  inf: 'M7 9a3 3 0 1 0 0 6c2 0 3-1.5 5-3s3-3 5-3a3 3 0 1 1 0 6c-2 0-3-1.5-5-3S9 9 7 9z', trophy: 'M8 4h8v5a4 4 0 0 1-8 0z M8 6H5a3 3 0 0 0 3 4 M16 6h3a3 3 0 0 1-3 4 M12 13v4 M8 20h8',
+  ticket: 'M3 8a2 2 0 0 0 2-2h14a2 2 0 0 0 2 2v2a2 2 0 0 0 0 4v2a2 2 0 0 0-2 2H5a2 2 0 0 0-2-2v-2a2 2 0 0 0 0-4z M10 6v12', q: 'M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.8.4-1 1-1 1.7v.5 M12 17h.01',
   belt: 'M2.5 10h4 M17.5 10h4 M2.5 14h4 M17.5 14h4 M9.5 6.5h5a3 3 0 0 1 3 3v5a3 3 0 0 1-3 3h-5a3 3 0 0 1-3-3v-5a3 3 0 0 1 3-3z M9.8 12a2.2 2.2 0 1 0 4.4 0 2.2 2.2 0 1 0-4.4 0z'
 };
 function svgIcon(name, size, filled) {
@@ -966,17 +1231,13 @@ function posterHtml(title, src, cls, extra) {
 }
 function itemPoster(item, cls, extra) { return posterHtml(item.title, item.poster, cls, extra); }
 function bar(p, cls) { return `<div class="bar ${cls || ''}" role="img" aria-label="${p} %"><i style="width:${clamp(p, 0, 100)}%"></i></div>`; }
-function ringSvg(size, w, p, id) {
-  const r = (size - w) / 2; const c = 2 * Math.PI * r;
-  return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" aria-hidden="true"><defs><linearGradient id="${id}" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#5B9BFF"/><stop offset=".5" stop-color="#6C82FF"/><stop offset="1" stop-color="#7C6BFF"/></linearGradient></defs>
-    <circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="var(--track)" stroke-width="${w}"/><circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="url(#${id})" stroke-width="${w}" stroke-linecap="round" stroke-dasharray="${(c * clamp(p, 0, 100) / 100).toFixed(1)} ${c.toFixed(1)}" transform="rotate(-90 ${size / 2} ${size / 2})"/></svg>`;
-}
 function teamDisc(name, team, cls, id) {
   const t = team && TEAMS[team];
   id = id || (t && t.id) || (state.nba && state.nba.ids[nbaAbbr(name)]) || '';
   const logo = id && state.logos && state.logos[id];
   const c = cls || 'disc';
-  if (logo) return `<div class="${c} has-logo" aria-hidden="true"><img src="${esc(logo)}" alt="" loading="lazy" onerror="var p=this.parentNode;if(p)p.classList.remove('has-logo');this.remove()"></div>`;
+  // si le logo ne charge pas, l'écouteur « error » global retire l'image et la classe has-logo (pas de script dans le HTML)
+  if (logo) return `<div class="${c} has-logo" aria-hidden="true"><img src="${esc(logo)}" alt="" loading="lazy"></div>`;
   const n = !t && NBA_BY[nbaAbbr(name)];
   const bg = t ? t.c1 : n ? n.c1 : `hsl(${hashHue(name)},45%,32%)`;
   const ring = t || n ? `;box-shadow:inset 0 0 0 3px ${(t || n).c2}` : '';
@@ -1089,9 +1350,9 @@ function importPack(data) {
   let n = 0;
   (data.feds || []).forEach((f) => { if (f && f.name && !state.feds.some((x) => x.name.toLowerCase() === f.name.toLowerCase())) state.feds.push({ name: f.name, kind: f.kind === 'major' ? 'major' : 'inde' }); });
   (data.shows || []).forEach((sh) => {
-    if (!sh || !sh.name || !sh.ts) return;
-    const id = sh.id || uid(); if (state.shows[id]) return;
-    state.shows[id] = { id, fed: sh.fed || 'Autre', name: sh.name, kind: CKINDS[sh.kind] ? sh.kind : 'show', ts: sh.ts, poster: sh.poster || '', seen: null, dismissed: false, createdAt: now() }; n++;
+    if (!sh || !sh.name || !isFinite(Number(sh.ts))) return;
+    const id = SAFE_ID.test(String(sh.id || '')) ? String(sh.id) : uid(); if (state.shows[id]) return;
+    state.shows[id] = { id, fed: String(sh.fed || 'Autre'), name: String(sh.name), kind: CKINDS[sh.kind] ? sh.kind : 'show', ts: Number(sh.ts), poster: String(sh.poster || ''), seen: null, dismissed: false, createdAt: now() }; n++;
   });
   save(); render(); return n;
 }
@@ -1150,8 +1411,8 @@ function faceInner(size) {
 }
 function avatarHtml() {
   const L = levelInfo(); const who = state.settings.pseudo ? esc(state.settings.pseudo) + ' · ' : '';
-  return `<a class="avatar" href="#profil" aria-label="Profil · ${who}niveau ${L.lvl}, ${L.into} XP sur ${L.need}"><span class="lv"><b>${CROWN}Niv. ${L.lvl}</b><small>${fmtNum(L.into)} / ${fmtNum(L.need)} XP</small></span>
-    <span class="ring">${ringSvg(46, 3.5, L.pct, 'rga')}<span class="face">${faceInner(18)}</span></span></a>`;
+  return `<a class="avatar" href="#profil" aria-label="Profil · ${who}niveau ${L.lvl}, ${L.into} XP sur ${L.need}"><span class="lv"><b>${CROWN}Niv. ${L.lvl}</b><small>${L.max ? esc(rankOf(L.lvl).name) : fmtNum(L.into) + ' / ' + fmtNum(L.need) + ' XP'}</small></span>
+    ${frameHtml(46, rankOf(L.lvl), L.pct, 'rga', faceInner(18))}</a>`;
 }
 function head(title, right) {
   return `<header class="head"><h1 class="h1">${title}</h1>${right == null ? avatarHtml() : right}</header>${demoBanner()}`;
@@ -1272,7 +1533,7 @@ function viewEncours() {
     const sub = nx && sh === 'episodes' ? [named ? '« ' + nx.title + ' »' : '', fmtRt(nx.rt || top.runtime)].filter(Boolean).join(' · ') : '';
     const ptext = progressText(top); const ctext = countText(top);
     const lead = ptext.startsWith('Prochain : ') ? `Prochain : <b>${esc(ptext.slice(11))}</b>` : esc(ptext);
-    h += `<div class="hero-wrap"${glow ? ` style="--glow:${glow}"` : ''}><section class="hero${glow ? ' tinted' : ''}${jd ? ' just' : ''}" aria-label="${esc(top.title)}, en cours">
+    h += `<div class="hero-wrap"${glow && /^\d{1,3},\d{1,3},\d{1,3}$/.test(glow) ? ` style="--glow:${glow}"` : ''}><section class="hero${glow ? ' tinted' : ''}${jd ? ' just' : ''}" aria-label="${esc(top.title)}, en cours">
       <a class="img" href="#item-${top.id}" aria-label="Ouvrir la fiche de ${esc(top.title)}" style="background:${grad(top.title)}">${img ? `<img src="${esc(img)}" alt="" fetchpriority="high">` : ''}${catBadge(top.type, true)}<h2 class="tt">${esc(top.title)}</h2></a>
       <div class="body"><div class="col" style="gap:3px"><div class="line"><span>${lead}</span>${ctext ? `<span class="cnt">${esc(ctext)}</span>` : ''}</div>${sub ? `<span class="sub">${esc(sub)}</span>` : ''}</div>
         ${topBar}
@@ -1292,7 +1553,7 @@ function viewEncours() {
     h += `<section class="section" aria-label="À venir"><div class="sec-head"><h2 class="h2">À venir</h2><button class="link" data-a="goto-catch">Voir tout${svgIcon('chevR', 15)}</button></div><div class="mgrid">${upcoming.map((x) => {
       const live = isToday(x.ts); const t = new Date(x.ts);
       const po = x.poster ? `<img class="main" src="${esc(x.poster)}" alt="" loading="lazy">` : '';
-      return `<button class="ev" data-a="show-open" data-id="${x.id}"><div class="poster" style="background:${grad(x.name)}" aria-hidden="true"><span class="ph">${esc(initials(x.name))}</span>${po}</div><div class="bd"><span class="date${live ? ' live' : ''}">${live ? 'Ce soir' : esc(t.toLocaleDateString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short' }).replace(/\.$/, ''))}${live ? '' : `<span class="until">· ${esc(untilText(x.ts).toLowerCase())}</span>`}</span><span class="nm">${esc(x.name)}</span><span class="sb">${pad2(t.getHours())}:${pad2(t.getMinutes())} · ${esc(x.fed)}</span></div></button>`;
+      return `<button class="ev" data-a="show-open" data-id="${x.id}"><div class="poster" style="background:${grad(x.name)}" aria-hidden="true"><span class="ph">${esc(initials(x.name))}</span>${po}</div><div class="bd"><span class="date${live ? ' live' : ''}">${live ? 'Ce soir' : esc(t.toLocaleDateString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short' }).replace(/\.$/, ''))}${live ? '' : `<span class="until">· ${esc(untilText(x.ts).toLowerCase())}</span>`}</span><span class="nm">${esc(x.name)}</span><span class="sb">${hhmm(x.ts)} · ${esc(x.fed)}</span></div></button>`;
     }).join('')}</div></section>`;
   }
   return page(h, 'encours');
@@ -1367,7 +1628,6 @@ function sportSection() {
   }).join('')}</div>`;
   return h;
 }
-const hhmm = (ts) => { const d = new Date(ts); return pad2(d.getHours()) + ':' + pad2(d.getMinutes()); };
 function nbaLogo(ab, size) {
   const t = NBA_BY[ab]; const id = state.nba.ids[ab]; const logo = id && state.logos && state.logos[id];
   return `<span class="nba-logo" style="width:${size}px;height:${size}px;${logo ? '' : `background:linear-gradient(135deg,${t.c1},${t.c2})`}" aria-hidden="true">${logo ? `<img src="${esc(logo)}" alt="">` : `<b style="font-size:${Math.round(size * 0.32)}px">${ab}</b>`}</span>`;
@@ -1398,7 +1658,7 @@ function nbaSection() {
 }
 function nbaForm() {
   const a = ui.add; const n = a.nba || (a.nba = { h: null, a: null });
-  const y = new Date(now() - DAY); const def = y.getFullYear() + '-' + pad2(y.getMonth() + 1) + '-' + pad2(y.getDate());
+  const def = isoDay(new Date(now() - DAY));
   const sel = (ab) => n.h === ab ? 'home' : n.a === ab ? 'away' : '';
   return `<form class="col" style="gap:14px" data-form="nba-add">
     <div class="nba-pickline"><div class="slot ${n.h ? 'on' : ''}">${n.h ? nbaLogo(n.h, 34) : ''}<span><small>Domicile</small><b>${n.h ? esc(NBA_BY[n.h].nick) : 'Choisis'}</b></span></div><span class="vs">vs</span>
@@ -1466,7 +1726,11 @@ function histoRows(evs) {
   for (const list of map.values()) {
     list.sort((a, b) => a.ts - b.ts);
     const e = list[list.length - 1]; const k = e.kind; let th, title, what, tag = '', href = '', type = e.type;
-    if (k === 'match') {
+    if (k === 'badge') {
+      const [, a, b] = String(e.item).split(':'); const sec = a === 's' && SECRET[b]; const f = !sec && FAM[a]; if (!sec && !f) continue;
+      type = 'badge'; title = sec ? sec.label : f.label + ' · ' + TIER_LABEL[TIERS[+b]].toLowerCase(); what = sec ? sec.desc : fmtNum(f.tiers[+b]) + ' ' + f.unit;
+      tag = 'Badge · +' + e.xp + ' XP'; href = '#badges'; th = `<span class="poster th badge-th">${medalHtml(sec ? sec.icon : f.icon, sec ? 'or' : TIERS[+b], 46)}</span>`;
+    } else if (k === 'match') {
       const m = state.matches[String(e.item).slice(2)]; type = 'sport';
       title = m ? m.home + ' – ' + m.away : (e.title || 'Match'); th = m ? matchThumb(m) : posterHtml('Match', '', 'th');
       what = (m && m.league ? m.league + ' · ' : '') + (MODE_PHRASE[e.mode] ? 'Regardé ' + MODE_PHRASE[e.mode] : 'Regardé'); href = m ? '#match-' + m.id : '';
@@ -1486,7 +1750,7 @@ function histoRows(evs) {
       } else if (k === 'tome') { const ns = list.filter((x) => x.kind === 'tome').map((x) => +x.key.slice(1)).sort((a, b) => a - b); what = ns.length === 1 ? 'Tome ' + ns[0] + ' lu' : 'Tomes ' + ns[0] + ' à ' + ns[ns.length - 1]; }
       else if (k === 'livre_fin') what = it.volumes && it.volumes.length > 1 ? 'Tome ' + e.key.slice(1) + ' terminé' : 'Livre terminé' + (e.pages ? ' · ' + e.pages + ' p.' : '');
       else if (k === 'livre_mi') what = 'À mi-parcours';
-      else if (k === 'film') what = e.rewatch ? 'Film revu' : 'Film vu';
+      else if (k === 'film') what = (e.rewatch ? 'Film revu' : 'Film vu') + (e.cine ? ' · au cinéma' : '');
       else if (k === 'jeu') what = 'Jeu terminé';
       else what = TYPES[it.type] ? TYPES[it.type].label : '';
       if (e.rewatch && k !== 'film') what += ' · revisionnage';
@@ -1497,7 +1761,7 @@ function histoRows(evs) {
 }
 function histoRowHtml(r, when) {
   const tagName = r.href ? `a href="${r.href}"` : 'div';
-  return `<${tagName} class="lrow"><span class="thw">${r.th}<span class="ci" title="${esc((CAT[r.type] || CAT.serie)[1])}">${svgIcon(catIcon(r.type), 13)}</span></span><div class="tx">${r.tag ? `<span class="tag">${esc(r.tag)}</span>` : ''}<b class="ti">${esc(r.title)}</b><span>${esc(r.what)}</span></div><span class="when">${esc(when)}</span></${r.href ? 'a' : 'div'}>`;
+  return `<${tagName} class="lrow${r.type === 'badge' ? ' gold-row' : ''}"><span class="thw">${r.th}${r.type === 'badge' ? '' : `<span class="ci" title="${esc((CAT[r.type] || CAT.serie)[1])}">${svgIcon(catIcon(r.type), 13)}</span>`}</span><div class="tx">${r.tag ? `<span class="tag">${esc(r.tag)}</span>` : ''}<b class="ti">${esc(r.title)}</b><span>${esc(r.what)}</span></div><span class="when">${esc(when)}</span></${r.href ? 'a' : 'div'}>`;
 }
 function viewHisto() {
   const f = ui.histoF;
@@ -1510,7 +1774,7 @@ function viewHisto() {
     else if (r.ts >= t0 - 6 * DAY) add('w', 'Cette semaine', r);
     else { const mk = monthKey(r.ts); add(mk, monthLabel(mk), r); }
   });
-  const when = (r) => r.ts >= t0 ? pad2(new Date(r.ts).getHours()) + ':' + pad2(new Date(r.ts).getMinutes()) : r.ts >= t0 - 6 * DAY ? new Date(r.ts).toLocaleDateString('fr-FR', { weekday: 'short' }).replace(/\.$/, '') : fmtDay(r.ts);
+  const when = (r) => r.ts >= t0 ? hhmm(r.ts) : r.ts >= t0 - 6 * DAY ? new Date(r.ts).toLocaleDateString('fr-FR', { weekday: 'short' }).replace(/\.$/, '') : fmtDay(r.ts);
   const used = FILTERS.filter(([k]) => k === 'tout' || rowsAll.some((r) => typeIn(k, r.type)));
   let h = head('Historique') + chipsHtml(used, f, 'histo-type');
   if (!groups.length) h += `<div class="empty">Rien pour l’instant.<br>Ce que tu coches apparaîtra ici, jour après jour.</div>`;
@@ -1530,7 +1794,7 @@ function viewHisto() {
 function viewRewind(year) {
   year = String(year || new Date().getFullYear());
   const evs = realEvents().filter((e) => String(new Date(e.ts).getFullYear()) === year);
-  const content = evs.filter((e) => !isBonus(e));
+  const content = evs.filter((e) => !isBonus(e) && e.kind !== 'badge');
   const xp = activeMonths().filter((mk) => mk.startsWith(year)).reduce((a, mk) => a + monthXp(mk), 0);
   const minutes = content.reduce((a, e) => a + (e.rt || 0), 0);
   const pages = evs.filter((e) => e.kind === 'livre_fin').reduce((a, e) => a + (e.pages || 0), 0);
@@ -1541,7 +1805,7 @@ function viewRewind(year) {
   const byType = {}; content.forEach((e) => { const t = e.kind === 'match' ? 'sport' : e.type; byType[t] = (byType[t] || 0) + 1; });
   const topType = Object.entries(byType).sort((a, b) => b[1] - a[1])[0];
   const finished = Object.values(state.items).filter((i) => evs.some((e) => e.item === i.id) && i.status === 'termine');
-  const badges = badgeStates().filter((b) => b.won && b.ts && String(new Date(b.ts).getFullYear()) === year);
+  const badges = wonList().filter((w) => !(w.secret ? state.secrets[w.secret].retro : state.tiers[w.fam][w.i].retro) && String(new Date(w.ts).getFullYear()) === year);
   const it = topItem && state.items[topItem[0]];
   const typeName = topType ? (topType[0] === 'sport' ? 'le sport' : TYPES[topType[0]] ? TYPES[topType[0]].plural.toLowerCase() : topType[0]) : '';
   let h = `<div class="row"><a class="icon-btn" href="#histo" aria-label="Retour">${svgIcon('back', 20)}</a></div>
@@ -1552,53 +1816,81 @@ function viewRewind(year) {
     if (it) h += `<section class="card pad row" style="gap:14px">${itemPoster(it, 'md')}<div class="col grow"><span class="label amber">Œuvre de l’année</span><span class="h3">${esc(it.title)}</span><span class="small muted">${plural(topItem[1], 'moment')} passé${topItem[1] > 1 ? 's' : ''} avec elle</span></div></section>`;
     h += `<div class="grid2">${topMonth ? `<div class="rw-stat"><span class="label">Mois le plus actif</span><b style="font-size:26px">${esc(MONTHS[topMonth[0]])}</b></div>` : ''}${topType ? `<div class="rw-stat"><span class="label">Ta passion</span><b style="font-size:26px">${esc(typeName)}</b></div>` : ''}
       <div class="rw-stat"><span class="label">Niveau</span><b>${levelInfo().lvl}</b></div><div class="rw-stat"><span class="label">Badges</span><b>${badges.length}</b></div></div>`;
-    if (badges.length) h += `<section class="section"><h2 class="h2">Badges de l’année</h2><div class="grid4">${badges.map((b) => `<div class="badge-cell"><span class="medal lg">${svgIcon(b.icon, 24)}</span>${esc(b.label)}</div>`).join('')}</div></section>`;
+    if (badges.length) h += `<section class="section"><h2 class="h2">Badges de l’année</h2><div class="grid4">${badges.map((w) => `<div class="badge-cell">${medalHtml(wonIcon(w), wonTier(w), 56)}${esc(wonName(w))}</div>`).join('')}</div></section>`;
   }
   return page(h, 'histo');
 }
 
 /* ---------- Profil (ouvert depuis l'avatar) ---------- */
-function badgeProgress(b) {
-  const evs = realEvents();
-  const cnt = (fn) => evs.filter(fn).length;
-  const T = { ep100: [(e) => e.kind === 'ep' && e.type !== 'catch', 100], ep500: [(e) => e.kind === 'ep' && e.type !== 'catch', 500], films10: [(e) => e.kind === 'film', 10], films50: [(e) => e.kind === 'film', 50],
-    livre1: [(e) => e.kind === 'livre_fin', 1], livres10: [(e) => e.kind === 'livre_fin', 10], tomes25: [(e) => e.kind === 'tome', 25], jeu1: [(e) => e.kind === 'jeu', 1], jeux5: [(e) => e.kind === 'jeu', 5],
-    match10: [(e) => e.kind === 'match', 10], sixers20: [(e) => e.kind === 'match' && e.team === 'sixers', 20], milan20: [(e) => e.kind === 'match' && e.team === 'milan', 20],
-    catch10: [(e) => e.kind === 'catch' || (e.kind === 'ep' && e.type === 'catch'), 10], revoir: [(e) => e.rewatch && !isBonus(e), 1] };
-  if (T[b.id]) { const n = Math.min(cnt(T[b.id][0]), T[b.id][1]); return { cur: n, max: T[b.id][1], sub: fmtNum(n) + ' / ' + fmtNum(T[b.id][1]) }; }
-  if (b.id === 'pages1000') { const n = Math.min(evs.filter((e) => e.kind === 'livre_fin').reduce((a, e) => a + (e.pages || 0), 0), 1000); return { cur: n, max: 1000, sub: fmtNum(n) + ' / 1 000 p.' }; }
-  if (b.id === 'niv5' || b.id === 'niv10') { const L = levelInfo(); const t = b.id === 'niv5' ? 5 : 10; return { cur: L.lvl - 1 + L.pct / 100, max: t - 1, sub: 'Niv. ' + L.lvl + ' / ' + t }; }
-  if (b.id === 'mois') { const g = goalResults(monthKey(now())); const met = g.filter((x) => x.met).length; return { cur: met, max: g.length || 1, sub: met + ' / ' + g.length + ' objectifs' }; }
-  const enc = Object.values(state.items).filter((i) => i.status === 'encours' && i.type !== 'catch');
-  if (b.id === 'saison') {
-    let best = null;
-    enc.filter((i) => shape(i) === 'episodes').forEach((i) => { const nx = nextUnit(i); if (!nx) return; const done = nx.e - 1; const r = done / nx.season.count; if (!best || r > best.r) best = { r, sub: i.title + ' · S' + nx.s + ' · ' + done + ' / ' + nx.season.count }; });
-    return best ? { cur: best.r, max: 1, sub: best.sub } : { cur: 0, max: 1, sub: 'Aucune saison en cours' };
+/* ---------- Gamification : médailles, cadres, profil, collection ---------- */
+function medalHtml(icon, tier, size, label) {
+  size = size || 56;
+  return `<span class="mdl ${tier ? 't-' + tier : 'off'}" style="width:${size}px;height:${size}px"${label ? ` role="img" aria-label="${esc(label)}"` : ' aria-hidden="true"'}>${svgIcon(icon, Math.round(size * 0.46))}</span>`;
+}
+// cadre d'avatar aux couleurs du rang (anneau de progression si pct est donné)
+function frameHtml(size, rank, pct, id, inner) {
+  const w = Math.max(3.5, Math.round(size * 0.07)); const r = (size - w) / 2; const c = 2 * Math.PI * r; const cx = size / 2;
+  const stops = rank.c.map((col, i) => `<stop offset="${(i / (rank.c.length - 1)).toFixed(2)}" stop-color="${col}"/>`).join('');
+  const arc = pct == null ? `<circle cx="${cx}" cy="${cx}" r="${r}" fill="none" stroke="url(#${id})" stroke-width="${w}"/>`
+    : `<circle cx="${cx}" cy="${cx}" r="${r}" fill="none" stroke="var(--track)" stroke-width="${w}"/><circle cx="${cx}" cy="${cx}" r="${r}" fill="none" stroke="url(#${id})" stroke-width="${w}" stroke-linecap="round" stroke-dasharray="${(c * clamp(pct, 0, 100) / 100).toFixed(1)} ${c.toFixed(1)}" transform="rotate(-90 ${cx} ${cx})"/>`;
+  let stars = '';
+  for (let k = 0; k < (rank.stars || 0); k++) {
+    const a = -Math.PI / 2 + (k - ((rank.stars - 1) / 2)) * 0.42; const s = size * 0.075;
+    stars += `<path transform="translate(${(cx + r * Math.cos(a) - s).toFixed(1)} ${(cx + r * Math.sin(a) - s).toFixed(1)}) scale(${(s / 12).toFixed(3)})" d="${ICONS.star}" fill="#FFF1C9" stroke="#8A5A12" stroke-width="1.2"/>`;
   }
-  const pick = (fn) => { let best = null; enc.filter(fn).forEach((i) => { const p = progress(i); if (p.total && (!best || p.done / p.total > best.r)) best = { r: p.done / p.total, sub: i.title + ' · ' + p.done + ' / ' + p.total }; }); return best ? { cur: best.r, max: 1, sub: best.sub } : { cur: 0, max: 1, sub: '—' }; };
-  if (b.id === 'serie') return pick((i) => shape(i) === 'episodes');
-  if (b.id === 'saga') return pick((i) => shape(i) === 'tomes' || (shape(i) === 'livre' && i.volumes.length > 1));
-  return { cur: 0, max: 1, sub: '' };
+  return `<span class="frame${rank.glow ? ' glow' : ''}" style="width:${size}px;height:${size}px"><svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" aria-hidden="true"><defs><linearGradient id="${id}" x1="0" y1="0" x2="1" y2="1">${stops}</linearGradient></defs>${arc}${stars}</svg><span class="face" style="inset:${Math.round(w * 1.6)}px">${inner}</span></span>`;
 }
-function badgeRow(b) {
-  const pr = b.won ? null : badgeProgress(b);
-  return `<div class="lrow badge-row"><span class="bdg ${b.won ? 'won' : ''}">${svgIcon(b.icon, 22)}</span><div class="tx" style="gap:7px"><div class="row between" style="gap:8px;align-items:baseline"><b>${esc(b.label)}</b><span class="bsub">${b.won ? esc(b.ts ? fmtDay(b.ts) : 'Obtenu') : esc(pr.sub)}</span></div>${b.won ? '' : bar(Math.round((pr.cur / pr.max) * 100), 'thin')}</div></div>`;
+const pipsHtml = (n) => `<span class="pips" aria-label="${n} palier${n > 1 ? 's' : ''} sur 4">${TIERS.map((t, i) => `<i class="${i < n ? 't-' + t : ''}"></i>`).join('')}</span>`;
+function famInfo(f) {
+  const v = badgeData().val[f.id]; const n = famTier(f.id); const nextT = f.tiers[n];
+  return { v, n, best: n ? TIERS[n - 1] : null, next: nextT, sub: nextT == null ? 'Platine ✓' : fmtNum(Math.min(v, nextT)) + ' / ' + fmtNum(nextT) };
 }
+const famsShown = () => FAMS.filter((f) => f.group !== 'perso' || Object.values(state.items).some((i) => ['livre', 'bd', 'manga', 'jeu'].includes(i.type)) || Object.keys(state.matches).length || state.catchLog.length);
+// le palier le plus proche, pour le « presque ! » du profil
+function nearestTier() {
+  let best = null;
+  for (const f of famsShown()) {
+    const x = famInfo(f); if (x.next == null || !x.v) continue;
+    const prev = x.n ? f.tiers[x.n - 1] : 0; const r = (x.v - prev) / (x.next - prev);
+    if (!best || r > best.r) best = { f, x, r };
+  }
+  return best;
+}
+function wonList() {
+  const out = [];
+  FAMS.forEach((f) => (state.tiers[f.id] || []).forEach((h, i) => { if (h) out.push({ fam: f.id, i, ts: h.ts, item: h.item }); }));
+  Object.entries(state.secrets || {}).forEach(([id, h]) => out.push({ secret: id, ts: h.ts, item: h.item }));
+  return out.sort((a, b) => b.ts - a.ts);
+}
+const wonIcon = (w) => (w.secret ? SECRET[w.secret].icon : FAM[w.fam].icon);
+const wonTier = (w) => (w.secret ? 'or' : TIERS[w.i]);
+const wonName = (w) => (w.secret ? SECRET[w.secret].label : FAM[w.fam].label + ' · ' + TIER_LABEL[TIERS[w.i]].toLowerCase());
+const unlockedTitles = () => FAMS.filter((f) => famTier(f.id) >= 3 && f.title).map((f) => f.title);
+function profileTitle() { const t = state.settings.title; return t && unlockedTitles().includes(t) ? t : ''; }
+function bannerImg() { const it = state.items[state.settings.banner]; return it && it.status === 'termine' ? it.backdrop || it.poster : ''; }
+
 function viewProfil() {
-  const L = levelInfo(); const mk = monthKey(now()); const goals = goalResults(mk);
-  const bs = badgeStates(); const won = bs.filter((b) => b.won);
-  const next = bs.filter((b) => !b.won).map((b) => Object.assign(b, { pr: badgeProgress(b) })).sort((a, b) => b.pr.cur / b.pr.max - a.pr.cur / a.pr.max).slice(0, 3);
-  const s = state.settings;
+  const L = levelInfo(); const R = rankOf(L.lvl); const NR = nextRank(L.lvl); const mk = monthKey(now()); const goals = goalResults(mk);
+  const s = state.settings; const cnt = badgeCount(); const won = wonList(); const near = nearestTier(); const title = profileTitle(); const ban = bannerImg();
   const evs = eventsByMonth()[mk] || [];
   const seriesN = new Set(evs.filter((e) => e.kind === 'ep' && e.type !== 'catch').map((e) => e.item)).size;
   const GI = { episodes: 'tv', films: 'reel', tomes: 'volume', matchs: 'ball' };
   const stat = (ic, n, one, many) => `<div class="card stat">${svgIcon(ic, 22)}<b>${n}</b><span>${n > 1 ? many : one}</span></div>`;
-  const h = head('Profil', `<button class="icon-btn sq" data-a="goto-settings" aria-label="Réglages">${svgIcon('gear', 21)}</button>`) + `
-  <section class="card lvl-card" aria-label="Niveau ${L.lvl}, ${L.into} XP sur ${L.need}">
-    <button class="ring big ring-btn" data-a="profile-edit" aria-label="Modifier le profil (pseudo et photo)">${ringSvg(120, 9, L.pct, 'rgp')}<span class="face">${faceInner(40)}</span><span class="face-edit" aria-hidden="true">${svgIcon('edit', 14)}</span></button>
-    <div class="col" style="gap:6px">${s.pseudo ? `<span class="pseudo">${esc(s.pseudo)}</span>` : `<button class="link" data-a="profile-edit" style="align-self:flex-start;padding:0;min-height:32px">${svgIcon('plus', 15)}Choisir un pseudo</button>`}<span class="lvl-label">${CROWN}NIVEAU ${L.lvl}</span>
-      <span class="lvl-xp">${fmtNum(L.into)} <small>/ ${fmtNum(L.need)} XP</small></span>
-      <span style="font-size:14px;color:var(--soft);line-height:1.4">Plus que <b style="color:var(--text)">${fmtNum(L.need - L.into)} XP</b> avant le niveau ${L.lvl + 1}.</span><span class="small muted">Total : ${fmtNum(L.xp)} XP</span></div>
+  const vit = (s.vitrine || []).map((k) => (k.startsWith('s:') ? state.secrets[k.slice(2)] && { secret: k.slice(2) } : famTier(k) && { fam: k, i: famTier(k) - 1 })).filter(Boolean).slice(0, 3);
+  const h = (ban ? `<div class="pf-banner" aria-hidden="true"><img src="${esc(ban)}" alt=""></div>` : '') + head('Profil', `<button class="icon-btn sq" data-a="goto-settings" aria-label="Réglages">${svgIcon('gear', 21)}</button>`) + `
+  <section class="rank-card" aria-label="${esc(R.name)}, niveau ${L.lvl}">
+    <button class="ring-btn" data-a="profile-edit" aria-label="Modifier le profil (pseudo et photo)">${frameHtml(128, R, L.pct, 'rgp', faceInner(40))}<span class="face-edit" aria-hidden="true">${svgIcon('edit', 14)}</span></button>
+    ${s.pseudo ? `<span class="pseudo">${esc(s.pseudo)}</span>` : `<button class="link" data-a="profile-edit">${svgIcon('plus', 15)}Choisir un pseudo</button>`}
+    ${title ? `<span class="title-chip">${svgIcon(FAMS.find((f) => f.title === title).icon, 14)}${esc(title)}</span>` : ''}
+    <span class="rank-line"><b class="rank-name" style="color:${R.c[R.c.length > 2 ? 1 : 0]}">${esc(R.name)}</b><span>· niveau ${L.lvl}</span></span>
+    <div class="col" style="gap:6px;width:100%;margin-top:4px">${L.max ? '' : bar(L.pct, 'thick gold')}
+      <span class="rank-sub"><span>${L.max ? 'Niveau maximum atteint' : `<b>${fmtNum(L.into)}</b> / ${fmtNum(L.need)} XP`}</span><span>${NR ? `${esc(NR.name)} au niveau ${NR.lvl}` : 'Rang suprême'}</span></span></div>
+    <button class="btn block act-row" data-a="perso-open">${svgIcon('edit', 18)}Personnaliser</button>
+  </section>
+  ${vit.length ? `<section class="section">${secHead('Ma vitrine')}<div class="shelf">${vit.map((w) => `<button class="shelf-it" data-a="${w.secret ? 'secret-open' : 'badge-open'}" data-v="${w.secret || w.fam}">${medalHtml(wonIcon(w), wonTier(w), 64)}<span>${esc(w.secret ? SECRET[w.secret].label : FAM[w.fam].label)}</span></button>`).join('')}</div></section>` : ''}
+  <section class="section" aria-label="Badges"><div class="sec-head"><h2 class="h2">Badges</h2><a href="#badges">${cnt.won} / ${cnt.total} · Voir la collection${svgIcon('chevR', 15)}</a></div>
+    ${won.length ? `<span class="field-lab">Derniers obtenus</span><div class="recent">${won.slice(0, 3).map((w) => `<button class="shelf-it" data-a="${w.secret ? 'secret-open' : 'badge-open'}" data-v="${w.secret || w.fam}">${medalHtml(wonIcon(w), wonTier(w), 56)}<span>${esc(wonName(w))}</span></button>`).join('')}</div>` : '<span class="small muted" style="padding:0 4px">Ton premier badge t’attend : 50 épisodes, 5 films ou ta première saison terminée.</span>'}
+    ${near ? `<button class="near" data-a="badge-open" data-v="${near.f.id}">${medalHtml(near.f.icon, null, 44)}<span class="grow col" style="gap:6px;text-align:left"><span class="row between" style="font-size:14px"><b>${esc(near.f.label)} · ${TIER_LABEL[TIERS[near.x.n]].toLowerCase()}</b><span class="muted">${near.r >= 0.8 ? 'presque !' : Math.round(near.r * 100) + ' %'}</span></span><span class="small soft">${esc(near.x.sub)} ${esc(near.f.unit)}</span>${bar(Math.round(near.r * 100), 'thin')}</span></button>` : ''}
   </section>
   <section class="section">${secHead('Ce mois-ci')}<div class="stats">
     ${stat('reel', countCat(evs, 'films'), 'Film terminé', 'Films terminés')}${stat('tv', seriesN, 'Série suivie', 'Séries suivies')}
@@ -1606,20 +1898,18 @@ function viewProfil() {
   <section class="section" aria-label="Objectifs du mois"><div class="sec-head"><h2 class="h2">Objectifs de ${esc(MONTHS[new Date().getMonth()])}</h2><button class="link" data-a="edit-goals">Modifier</button></div>
     <div class="card pad col" style="gap:16px">${goals.length ? goals.map((g) => `<div class="goal-line"><div class="top">${svgIcon(GI[g.key] || 'target', 18)}<span class="grow">${esc(g.label)}</span><b class="${g.met ? 'met' : ''}">${g.count} <span>/ ${g.target}</span></b></div>${bar(Math.round((g.count / g.target) * 100), 'thick' + (g.met ? ' amber' : ''))}</div>`).join('') : '<span class="muted small">Aucun objectif ce mois-ci.</span>'}
     <span class="small muted">Chaque objectif atteint rapporte ${XP.goal} XP.</span></div></section>
-  <section class="section" aria-label="Badges"><div class="sec-head"><h2 class="h2">Prochains badges</h2><button class="link" data-a="badges-all">Voir tout (${won.length} / ${bs.length})${svgIcon('chevR', 15)}</button></div>
-    <div class="list">${next.length ? next.map(badgeRow).join('') : '<div class="lrow"><span class="tx"><b>Tous les badges sont obtenus !</b></span></div>'}</div></section>
   <section class="card pad col" style="gap:12px" id="reglages" aria-label="Réglages">
     <h2 class="h2">Réglages</h2>
     <form class="col" style="gap:12px" data-form="keys">
       <label class="field"><span>Clé TMDB (films, séries, docus)</span><input class="input" name="tmdb" value="${esc(s.tmdbKey)}" autocomplete="off" spellcheck="false" placeholder="Clé API ou jeton d’accès"></label>
       <label class="field"><span>Clé RAWG (jeux vidéo, facultatif)</span><input class="input" name="rawg" value="${esc(s.rawgKey)}" autocomplete="off" spellcheck="false" placeholder="Clé API RAWG"></label>
-      <span class="small muted">Tes clés restent sur ce téléphone. AniList (manga), Google Books et Open Library (livres) et TheSportsDB (sport) n’en demandent pas.</span>
+      <span class="small muted">Tes clés restent sur ce téléphone. La clé TMDB sert aussi aux badges Voyageur, Décennies et Sagas. AniList (manga), Google Books et Open Library (livres) et TheSportsDB (sport) n’en demandent pas.</span>
       <div class="row"><button class="btn prim grow" type="submit">Enregistrer</button><button class="btn" type="button" data-a="test-tmdb">Tester TMDB</button></div>
     </form>
   </section>
   <section class="card pad col" style="gap:12px" aria-label="Sauvegarde">
     <h2 class="h2">Sauvegarde</h2>
-    <span class="small muted">Tes données sont uniquement sur ce téléphone. Exporte-les régulièrement.${state.lastExport ? ' Dernier export : ' + esc(fmtDate(state.lastExport)) + '.' : ' Aucun export pour l’instant.'}</span>
+    <span class="small muted">Tes données sont uniquement sur ce téléphone. Exporte-les régulièrement. Tes clés TMDB et RAWG ne sont pas incluses dans la sauvegarde.${state.lastExport ? ' Dernier export : ' + esc(fmtDate(state.lastExport)) + '.' : ' Aucun export pour l’instant.'}</span>
     <div class="grid2"><button class="btn" data-a="export">${svgIcon('download', 18)}Exporter</button>
       <label class="btn">${svgIcon('upload', 18)}Importer<input type="file" accept="application/json,.json" data-change="import" class="sr"></label></div>
     <button class="link" data-a="copy-data" style="align-self:center">Copier les données (si l’export ne marche pas)</button>
@@ -1629,7 +1919,166 @@ function viewProfil() {
     <button class="btn danger block" data-a="wipe">${svgIcon('trash', 18)}Tout effacer</button>
     <span class="small muted" style="text-align:center;line-height:1.6">Rewind ${APP_VERSION} · Films et séries : TMDB (ce produit utilise l’API TMDB mais n’est ni approuvé ni certifié par TMDB) · Manga : AniList · Livres : Google Books, Open Library · Jeux : RAWG · Sport : TheSportsDB</span>
   </section>`;
-  return page(h, 'profil');
+  return page(h, 'profil', null, ban ? 'has-banner' : '');
+}
+
+/* ---------- Collection de badges ---------- */
+const BDG_FILTERS = [['tout', 'Tout'], ['series', 'Séries'], ['films', 'Films'], ['habits', 'Habitudes'], ['sagas', 'Sagas'], ['secrets', 'Secrets'], ['perso', 'Ma version']];
+function viewBadges() {
+  const f = ui.bdgF || 'tout'; const cnt = badgeCount(); const fams = famsShown();
+  const byTier = TIERS.map((t, i) => fams.reduce((a, x) => a + ((state.tiers[x.id] || [])[i] ? 1 : 0), 0));
+  const cell = (x) => { const fi = famInfo(x); return `<button class="bcell" data-a="badge-open" data-v="${x.id}">${medalHtml(x.icon, fi.best, 64, x.label + (fi.best ? ', ' + fi.best : ''))}<span class="bl">${esc(x.label)}</span>${pipsHtml(fi.n)}<span class="bs">${esc(fi.sub)}</span></button>`; };
+  let h = `<header class="head"><button class="icon-btn" data-a="back" aria-label="Retour">${svgIcon('back', 20)}</button><h1 class="h1 grow">Badges</h1></header>
+    <div class="col" style="gap:8px"><span class="row between" style="font-size:14px"><span><b style="font-size:20px">${cnt.won}</b> / ${cnt.total} badges</span><span class="muted small">${byTier.slice().reverse().map((n, k) => n + ' ' + TIERS[3 - k]).join(' · ')}</span></span>${bar(Math.round((cnt.won / cnt.total) * 100), 'thick')}</div>
+    ${chipsHtml(BDG_FILTERS.filter(([k]) => k !== 'perso' || fams.some((x) => x.group === 'perso')), f, 'bdg-type', 'Familles')}`;
+  for (const [g, label] of GROUPS) {
+    if (!(f === 'tout' || f === g)) continue; const list = fams.filter((x) => x.group === g); if (!list.length) continue;
+    h += `<section class="section"><span class="field-lab">${esc(label)}</span><div class="bgrid">${list.map(cell).join('')}</div></section>`;
+  }
+  if (f === 'tout' || f === 'sagas') {
+    const sagas = Object.keys(state.colls || {}).map((id) => Object.assign({ id }, sagaState(id))).filter((x) => x.parts && x.parts.length > 1).sort((a, b) => (b.done - a.done) || b.seen.length / b.parts.length - a.seen.length / a.parts.length);
+    h += `<section class="section"><span class="field-lab">Sagas (collections TMDB)</span>${sagas.length ? `<div class="list">${sagas.map((x) => `<div class="lrow saga-row"><span class="saga-po">${x.parts.slice(0, 4).map((p) => `<i style="background:${grad(p.title)}">${p.poster ? `<img src="${esc(p.poster)}" alt="" loading="lazy">` : ''}</i>`).join('')}</span><div class="tx" style="gap:6px"><span class="row between"><b>${esc(x.name.replace(/\s*[-–]\s*(Saga|Collection)$|\s+(Saga|Collection)$/i, ''))}</b><span class="small ${x.done ? 'gold-t' : 'soft'}">${x.seen.length} / ${x.parts.length}${x.done ? ' ✓' : ''}</span></span>${bar(Math.round((x.seen.length / x.parts.length) * 100), 'thin' + (x.done ? ' amber' : ''))}</div></div>`).join('')}</div>` : '<span class="small muted" style="padding:0 4px">Les sagas apparaissent quand tu ajoutes un film qui en fait partie (Star Wars, Harry Potter…). Il faut ta clé TMDB.</span>'}</section>`;
+  }
+  if (f === 'tout' || f === 'secrets') {
+    h += `<section class="section"><span class="field-lab">Secrets · ${cnt.sec} trouvé${cnt.sec > 1 ? 's' : ''} sur ${SECRETS.length}</span><div class="bgrid">${SECRETS.map((x) => state.secrets[x.id]
+      ? `<button class="bcell" data-a="secret-open" data-v="${x.id}">${medalHtml(x.icon, 'or', 64, x.label)}<span class="bl">${esc(x.label)}</span></button>`
+      : `<span class="bcell">${medalHtml('q', null, 64, 'Badge secret')}<span class="bl muted">Secret</span></span>`).join('')}</div></section>`;
+  }
+  return page(h, '');
+}
+// détail d'un badge : ses 4 paliers, quand et avec quoi ils ont été obtenus, la suite
+function badgeSheet(fid) {
+  const f = FAM[fid]; const fi = famInfo(f); const have = state.tiers[fid] || [];
+  const rows = f.tiers.map((t, i) => {
+    const h = have[i]; const it = h && state.items[h.item];
+    return `<div class="tier-row">${medalHtml(f.icon, h ? TIERS[i] : null, 36)}<span class="grow col" style="gap:2px"><b>${TIER_LABEL[TIERS[i]]} · ${fmtNum(t)} ${esc(f.unit)}</b><span class="small muted">${h ? 'Obtenu le ' + esc(fmtDate(h.ts)) + (it ? ' · ' + esc(it.title) : '') : '+' + TIER_XP[i] + ' XP'}</span></span>${h ? `<span class="ok">${svgIcon('check', 18)}</span>` : ''}</div>`;
+  }).join('');
+  const nx = fi.next; const prev = fi.n ? f.tiers[fi.n - 1] : 0;
+  openModal('', `<div class="col" style="gap:10px;align-items:center;text-align:center"><span class="grip" aria-hidden="true"></span>
+    ${medalHtml(f.icon, fi.best, 112, f.label)}<span class="field-lab" style="padding:0">${fi.best ? 'Palier ' + TIER_LABEL[fi.best].toLowerCase() : 'Pas encore obtenu'}</span>
+    <h2 class="sheet-sub" style="padding:0">${esc(f.label)}</h2><p class="small soft" style="margin:0;line-height:1.5">${esc(f.desc)}</p>
+    <div class="col" style="gap:0;width:100%;text-align:left">${rows}</div>
+    ${nx != null ? `<div class="col" style="gap:6px;width:100%;text-align:left"><span class="row between small"><b>Vers ${TIER_LABEL[TIERS[fi.n]].toLowerCase()}</b><span class="muted">${fmtNum(Math.min(fi.v, nx))} / ${fmtNum(nx)}</span></span>${bar(Math.round(((Math.min(fi.v, nx) - prev) / (nx - prev)) * 100), 'thick gold')}</div>` : ''}
+    ${fi.best === 'platine' ? `<button class="btn block" data-a="share" data-k="fam" data-v="${fid}">${svgIcon('upload', 18)}Partager la carte</button>` : ''}</div>`, { sheet: true });
+}
+function secretSheet(id) {
+  const x = SECRET[id]; const h = state.secrets[id]; const it = h && state.items[h.item];
+  openModal('', `<div class="col" style="gap:10px;align-items:center;text-align:center"><span class="grip" aria-hidden="true"></span>${medalHtml(x.icon, 'or', 112, x.label)}
+    <span class="field-lab" style="padding:0">Badge secret · +${SECRET_XP} XP</span><h2 class="sheet-sub" style="padding:0">${esc(x.label)}</h2><p class="small soft" style="margin:0">${esc(x.desc)}</p>
+    ${h ? `<span class="small muted">Obtenu le ${esc(fmtDate(h.ts))}${it ? ' · ' + esc(it.title) : ''}</span>` : ''}
+    <button class="btn block" data-a="share" data-k="secret" data-v="${id}">${svgIcon('upload', 18)}Partager la carte</button></div>`, { sheet: true });
+}
+// personnaliser : titre (débloqué par l'or d'une famille), vitrine de 3 badges, bannière (série terminée)
+function persoSheet() {
+  const s = state.settings; const titles = unlockedTitles(); const cur = profileTitle(); const vit = s.vitrine || [];
+  const won = FAMS.filter((f) => famTier(f.id)).map((f) => ({ k: f.id, icon: f.icon, tier: TIERS[famTier(f.id) - 1], label: f.label })).concat(SECRETS.filter((x) => state.secrets[x.id]).map((x) => ({ k: 's:' + x.id, icon: x.icon, tier: 'or', label: x.label })));
+  const bans = Object.values(state.items).filter((i) => i.status === 'termine' && i.seasons && i.type !== 'catch' && (i.backdrop || i.poster));
+  const lockedTitles = FAMS.filter((f) => f.title && famTier(f.id) < 3 && famsShown().includes(f)).slice(0, 6);
+  openModal('', `<div class="col" style="gap:12px"><span class="grip" aria-hidden="true"></span><h2 class="sheet-sub" style="padding:0">Personnaliser mon profil</h2>
+    <span class="field-lab" style="padding:0">Titre sous ton pseudo</span><div class="chips" style="margin:0;padding:0;flex-wrap:wrap">
+      <button class="chip ${cur ? '' : 'on'}" data-a="pick-title" data-v="">Aucun</button>${titles.map((t) => `<button class="chip ${t === cur ? 'on' : ''}" data-a="pick-title" data-v="${esc(t)}">${esc(t)}</button>`).join('')}${lockedTitles.map((f) => `<span class="chip locked" title="${esc(f.label)} or">${esc(f.title)}</span>`).join('')}</div>
+    <span class="small muted">Un titre se débloque avec l’or de son badge.</span>
+    <span class="field-lab" style="padding:0">Vitrine · 3 badges au plus</span>${won.length ? `<div class="pick-grid">${won.map((w) => `<button class="pick ${vit.includes(w.k) ? 'on' : ''}" data-a="pick-vit" data-v="${w.k}" aria-pressed="${vit.includes(w.k)}">${medalHtml(w.icon, w.tier, 48)}<span>${esc(w.label)}</span></button>`).join('')}</div>` : '<span class="small muted">Gagne ton premier badge pour remplir ta vitrine.</span>'}
+    <span class="field-lab" style="padding:0">Bannière</span>${bans.length ? `<div class="ban-grid"><button class="ban ${s.banner ? '' : 'on'}" data-a="pick-banner" data-v="">Aucune</button>${bans.map((i) => `<button class="ban ${s.banner === i.id ? 'on' : ''}" data-a="pick-banner" data-v="${i.id}" aria-label="${esc(i.title)}"><img src="${esc(i.backdrop || i.poster)}" alt="" loading="lazy"></button>`).join('')}</div>` : ''}
+    <span class="small muted">Chaque série terminée débloque son image comme bannière.</span>
+    <button class="btn prim block" data-a="modal-close">Terminé</button></div>`, { sheet: true });
+}
+
+/* ---------- Célébrations : carte du bas (bronze, argent, or), écran plein (rang, platine, secret), récap ---------- */
+function celebrate(fresh, rankUp) {
+  ui.fs = ui.fs || [];
+  if (rankUp) ui.fs.push({ t: 'rank', id: rankUp.id });
+  const big = fresh.filter((x) => x.secret || x.i === 3); const small = fresh.filter((x) => !x.secret && x.i < 3);
+  big.forEach((x) => ui.fs.push(Object.assign({ t: 'tier' }, x)));
+  // la carte du bas attend la fin d'un écran plein, sinon elle passerait dessous sans être vue
+  if (small.length) { if (ui.fs.length) ui.cardsLater = (ui.cardsLater || []).concat(small); else badgeCard(small); }
+  if (big.length || rankUp) buzz(30);
+}
+function badgeCard(list) {
+  let box = document.getElementById('toasts-act');
+  if (!box) { box = document.createElement('div'); box.id = 'toasts-act'; document.body.appendChild(box); }
+  const gold = list.length === 1 && list[0].i === 2; const xp = list.reduce((a, x) => a + TIER_XP[x.i], 0);
+  const el = document.createElement('div'); el.className = 'toast bcard' + (gold ? ' gold' : ''); el.setAttribute('role', 'status');
+  const one = list[0]; const f = FAM[one.fam];
+  el.innerHTML = list.length === 1
+    ? `${medalHtml(f.icon, TIERS[one.i], gold ? 76 : 60)}<span class="grow col" style="gap:3px"><span class="field-lab" style="padding:0;color:${gold ? 'var(--amber)' : ''}">Badge débloqué · ${TIER_LABEL[TIERS[one.i]].toLowerCase()}</span><b class="bc-t">${esc(f.label)}</b><span class="small soft">${fmtNum(f.tiers[one.i])} ${esc(f.unit)}</span></span><span class="col" style="gap:8px;align-items:flex-end"><span class="xp-chip">+${xp} XP</span><button class="toast-act" data-a="badge-open" data-v="${f.id}">Voir</button></span>`
+    : `<span class="grow col" style="gap:8px"><span class="row between"><span class="field-lab" style="padding:0">${list.length} badges débloqués</span><span class="xp-chip">+${xp} XP</span></span><span class="row" style="gap:6px">${list.map((x) => medalHtml(FAM[x.fam].icon, TIERS[x.i], 44)).join('')}<span class="small soft grow">${list.map((x) => `<b>${esc(FAM[x.fam].label)}</b> ${TIER_LABEL[TIERS[x.i]].toLowerCase()}`).join(', ')}</span></span><a class="toast-act" href="#badges">Voir les badges</a></span>`;
+  el.addEventListener('click', () => el.remove());
+  box.appendChild(el); if (gold) buzz(20);
+  setTimeout(() => { el.classList.add('out'); setTimeout(() => el.remove(), 320); }, gold ? 6000 : 4500);
+}
+// l'écran plein vit hors de #app : il n'est redessiné (et ses animations relancées) que s'il change
+let fsLast = '';
+function renderFs() {
+  const html = fsHtml(); if (html === fsLast) return; fsLast = html;
+  let box = document.getElementById('fs-box'); if (!box) { box = document.createElement('div'); box.id = 'fs-box'; document.body.appendChild(box); }
+  box.innerHTML = html;
+}
+function fsHtml() {
+  const x = ui.fs && ui.fs[0]; if (!x) return '';
+  const L = levelInfo(); const R = rankOf(L.lvl); const conf = '<span class="confetti" aria-hidden="true">' + Array.from({ length: 14 }, (_, i) => `<i style="left:${(i * 37) % 100}%;animation-delay:${(i % 7) * 0.12}s"></i>`).join('') + '</span>';
+  if (x.t === 'rank') {
+    const r = RANKS.find((k) => k.id === x.id);
+    return `<div class="fs fs-rank" role="dialog" aria-label="Nouveau rang : ${esc(r.name)}">${conf}<span class="field-lab" style="color:var(--amber)">Nouveau rang</span>${frameHtml(176, r, null, 'rgu', faceInner(56))}
+      <h2 class="fs-t gold-grad">${esc(r.name)}</h2><p class="fs-p">Niveau ${L.lvl} atteint. <b>${esc(r.frame)}</b> débloqué pour ton avatar.</p>
+      <div class="fs-acts"><button class="btn prim block" data-a="fs-next">Continuer</button><button class="btn block" data-a="share" data-k="rank" data-v="${r.id}">${svgIcon('upload', 18)}Partager la carte</button></div>${nextRank(L.lvl) ? `<span class="small muted">Prochain rang : ${esc(nextRank(L.lvl).name)}, au niveau ${nextRank(L.lvl).lvl}</span>` : ''}</div>`;
+  }
+  if (x.t === 'tier') {
+    const sec = x.secret && SECRET[x.secret]; const f = x.fam && FAM[x.fam]; const h = sec ? state.secrets[x.secret] : (state.tiers[x.fam] || [])[x.i]; const it = h && state.items[h.item];
+    const name = sec ? sec.label : fmtNum(f.tiers[3]) + ' ' + f.unit; const ft = f && f.title;
+    return `<div class="fs fs-plat" role="dialog" aria-label="Badge ${esc(sec ? sec.label : f.label)}">${conf}<span class="field-lab" style="color:#B8ACFF">${sec ? 'Badge secret' : 'Badge platine'}</span>${medalHtml(sec ? sec.icon : f.icon, sec ? 'or' : 'platine', 168)}
+      <h2 class="fs-t ${sec ? 'gold-grad' : 'plat-grad'}">${esc(sec ? sec.label : f.label)}</h2><p class="fs-p">${esc(sec ? sec.desc : name)}${it ? `<br>avec <b>${esc(it.title)}</b>` : ''}</p>
+      <span class="xp-chip">+${sec ? SECRET_XP : TIER_XP[3]} XP</span>${ft && !sec ? `<span class="small muted">Titre « ${esc(ft)} » déjà disponible pour ton profil</span>` : ''}
+      <div class="fs-acts"><button class="btn prim block" data-a="fs-next">Continuer</button><button class="btn block" data-a="share" data-k="${sec ? 'secret' : 'fam'}" data-v="${x.secret || x.fam}">${svgIcon('upload', 18)}Partager la carte</button></div></div>`;
+  }
+  if (x.t === 'recap') {
+    const won = wonList();
+    return `<div class="fs" role="dialog" aria-label="Ta collection est prête"><span class="field-lab" style="color:#7FB2FF">Nouveau dans Rewind</span>${frameHtml(120, R, null, 'rgr', faceInner(40))}
+      <h2 class="fs-t">Ta collection est prête</h2><p class="fs-p">Tout ce que tu as déjà regardé compte : tu démarres au rang <b>${esc(R.name)}</b> (niveau ${L.lvl}), avec <b>${won.length} badge${won.length > 1 ? 's' : ''}</b> déjà gagné${won.length > 1 ? 's' : ''}.</p>
+      ${won.length ? `<div class="recap-grid">${won.slice(0, 10).map((w) => medalHtml(wonIcon(w), wonTier(w), 46)).join('')}</div>` : ''}
+      <span class="small muted">Les badges déjà gagnés n’ajoutent pas d’XP : la suite est à conquérir.</span>
+      <div class="fs-acts"><button class="btn prim block" data-a="fs-next" data-v="#badges">Voir ma collection</button><button class="btn block" data-a="fs-next">Plus tard</button></div></div>`;
+  }
+  return '';
+}
+
+/* ---------- Carte à partager (image 1080 × 1920, format story) ---------- */
+const TIER_RGB = { bronze: ['#E9B48A', '#9A5F35', '#3A1E0A'], argent: ['#F7FAFC', '#9AA7B6', '#22303D'], or: ['#FFE8B0', '#D39A3A', '#4A2B05'], platine: ['#E4ECFF', '#8C7BFF', '#1A1550'] };
+async function shareCard(kind, id) {
+  try { await Promise.all(['italic 800 132px "Barlow Condensed"', '800 64px "Barlow Condensed"', '700 48px Manrope'].map((f) => document.fonts.load(f))); } catch (e) { /* polices de secours */ }
+  const W = 1080, H = 1920; const c = document.createElement('canvas'); c.width = W; c.height = H; const g = c.getContext('2d');
+  const L = levelInfo(); const R = rankOf(L.lvl); const s = state.settings;
+  let big, sub, icon, tier, accent = '#B8ACFF';
+  if (kind === 'rank') { const r = RANKS.find((k) => k.id === id) || R; big = r.name; sub = 'Nouveau rang · niveau ' + L.lvl; accent = r.c[0]; }
+  else if (kind === 'secret') { const x = SECRET[id]; big = x.label; sub = 'Badge secret'; icon = x.icon; tier = 'or'; accent = '#EDB965'; }
+  else { const f = FAM[id]; const n = famTier(id); tier = TIERS[Math.max(0, n - 1)]; big = fmtNum(f.tiers[Math.max(0, n - 1)]) + ' ' + f.unit; sub = 'Badge ' + tier + ' · ' + f.label; icon = f.icon; accent = TIER_RGB[tier][0]; }
+  const bg = g.createLinearGradient(0, 0, 0, H); bg.addColorStop(0, '#141A2E'); bg.addColorStop(1, '#0A0D11'); g.fillStyle = bg; g.fillRect(0, 0, W, H);
+  const glow = g.createRadialGradient(W / 2, 700, 40, W / 2, 700, 700); glow.addColorStop(0, accent + '66'); glow.addColorStop(1, 'transparent'); g.fillStyle = glow; g.fillRect(0, 0, W, H);
+  g.textAlign = 'center'; g.fillStyle = '#E6ECF2'; g.font = '800 64px "Barlow Condensed", sans-serif'; g.fillText('R E W I N D', W / 2, 170);
+  const cx = W / 2, cy = 700, rad = 280;
+  if (icon) {
+    const t = TIER_RGB[tier]; const mg = g.createRadialGradient(cx - 90, cy - 110, 20, cx, cy, rad * 1.2); mg.addColorStop(0, t[0]); mg.addColorStop(0.62, t[1]); mg.addColorStop(1, t[2]);
+    g.beginPath(); g.arc(cx, cy, rad, 0, 7); g.fillStyle = mg; g.fill();
+    g.save(); g.translate(cx - 129, cy - 129); g.scale(10.75, 10.75); g.strokeStyle = t[2]; g.lineWidth = 2; g.lineCap = g.lineJoin = 'round'; g.stroke(new Path2D(ICONS[icon])); g.restore();
+  } else {
+    const rk = RANKS.find((k) => k.id === id) || R; const rg = g.createLinearGradient(cx - rad, cy - rad, cx + rad, cy + rad); rk.c.forEach((col, i) => rg.addColorStop(i / (rk.c.length - 1), col));
+    g.beginPath(); g.arc(cx, cy, rad, 0, 7); g.lineWidth = 34; g.strokeStyle = rg; g.stroke();
+    g.save(); g.beginPath(); g.arc(cx, cy, rad - 40, 0, 7); g.clip(); g.fillStyle = '#1A2430'; g.fillRect(cx - rad, cy - rad, rad * 2, rad * 2);
+    if (s.avatar) { try { const im = await loadImage(s.avatar); g.drawImage(im, cx - rad + 40, cy - rad + 40, (rad - 40) * 2, (rad - 40) * 2); } catch (e) { /* */ } }
+    else { g.fillStyle = '#E6ECF2'; g.font = '800 240px "Barlow Condensed", sans-serif'; g.fillText((s.pseudo || '?').trim()[0].toUpperCase(), cx, cy + 85); }
+    g.restore();
+  }
+  g.fillStyle = accent; g.font = '800 44px Manrope, sans-serif'; g.fillText(sub.toUpperCase(), W / 2, 1110);
+  g.fillStyle = '#FFFFFF'; g.font = 'italic 800 132px "Barlow Condensed", sans-serif';
+  const words = big.toUpperCase().split(' '); const lines = []; let line = '';
+  words.forEach((w) => { const tst = line ? line + ' ' + w : w; if (g.measureText(tst).width > 900 && line) { lines.push(line); line = w; } else line = tst; }); lines.push(line);
+  lines.slice(0, 3).forEach((l, i) => g.fillText(l, W / 2, 1270 + i * 130));
+  g.fillStyle = '#D9E1EA'; g.font = '700 48px Manrope, sans-serif'; g.fillText((s.pseudo ? s.pseudo + ' · ' : '') + R.name + (profileTitle() ? ' · ' + profileTitle() : ''), W / 2, 1720);
+  g.fillStyle = '#98A6B5'; g.font = '600 38px Manrope, sans-serif'; g.fillText(fmtDate(now()), W / 2, 1790);
+  const blob = await new Promise((r) => c.toBlob(r, 'image/png')); const file = new File([blob], 'rewind-' + (id || kind) + '.png', { type: 'image/png' });
+  try { if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: 'Rewind' }); return; } } catch (e) { if (e && e.name === 'AbortError') return; }
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = file.name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  toast('Carte enregistrée dans tes téléchargements');
 }
 
 /* ---------- Ajouter ---------- */
@@ -1696,7 +2145,7 @@ function manualForm() {
     <button class="btn block" type="button" data-a="add-search">Revenir à la recherche</button></form>`;
 }
 function matchForm() {
-  const d = new Date(); const local = d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + 'T' + pad2(d.getHours()) + ':00';
+  const local = isoDay(new Date()) + 'T' + pad2(new Date().getHours()) + ':00';
   return `<div class="banner info">${svgIcon('sync', 18)}<span class="grow">Les matchs des Sixers et du Milan arrivent tout seuls.</span><button class="link" data-a="sport-sync">Actualiser</button></div>
   <form class="col" style="gap:14px" data-form="match-add">
     <label class="field"><span>Sport</span><select class="input" name="sport"><option value="nba">Basket</option><option value="foot">Football</option><option value="autre">Autre</option></select></label>
@@ -1721,7 +2170,7 @@ function catchForm() {
   const major = fedKind(a.fed) === 'major';
   const kind = major ? (a.ckind === 'ppv' ? 'ppv' : 'hebdo') : 'show';
   const plan = !!a.cplan;
-  const d = new Date(); const today = d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+  const today = isoDay(new Date());
   return `<form class="col" style="gap:14px" data-form="catch-add">
     <div class="seg"><button type="button" class="${plan ? '' : 'on'}" data-a="catch-plan" data-v="0">Déjà vu</button><button type="button" class="${plan ? 'on' : ''}" data-a="catch-plan" data-v="1">À venir</button></div>
     <div class="field"><span>Fédération</span><div class="chips">${state.feds.map((f) => `<button type="button" class="chip ${a.fed === f.name ? 'on' : ''}" data-a="catch-fed" data-v="${esc(f.name)}">${esc(f.name)}</button>`).join('')}<button type="button" class="chip" data-a="feds-open">+ Fédération</button></div></div>
@@ -1808,8 +2257,10 @@ function viewItem(id) {
   let main = '';
   if (it.status === 'envie') { const v = envieVerb(it); main = `<button class="btn prim block big" data-a="${v.a}" data-id="${it.id}">${v.a === 'envie-seen' ? v.icon : ''}${esc(v.label)}${v.a === 'envie-seen' ? '' : v.icon}</button>`; }
   else if (nextOrRewatch(it) || (ui.justDone && ui.justDone.id === it.id)) main = mainBtn(it, nextOrRewatch(it), 'block big');
-  b += `<section class="col" style="gap:14px">${prog}${main}
+  const cine = sh === 'film' && it.status !== 'envie' && main ? `<label class="toggle"><input type="checkbox" data-change="cine" data-id="${it.id}" ${ui.cine && ui.cine[it.id] ? 'checked' : ''}><span class="sw"></span><span class="grow"><b style="font-size:14px">Vu au cinéma</b><br><span class="small muted">+${CINE_XP} XP, même pour un film ancien ou revu</span></span>${svgIcon('ticket', 20)}</label>` : '';
+  b += `<section class="col" style="gap:14px">${prog}${cine}${main}
     <button class="btn block act-row" data-a="item-history" data-id="${it.id}">${svgIcon('clock', 19)}Mon activité sur ${esc((TYPE_OF[it.type] || TYPE_OF.serie)[0])}</button></section>`;
+  b += itemTrophies(it);
   if (it.overview) {
     // résumé replié sur 3 lignes : celui qui veut juste cocher un épisode y arrive plus vite
     const long = it.overview.length > 170; const open = ui.ovOpen && ui.ovOpen[it.id];
@@ -1890,10 +2341,38 @@ function livreBlock(it) {
   if (it.volumes.length > 1 || it.type === 'livre') h += `<button class="btn block" data-a="add-vol" data-id="${it.id}">${svgIcon('plus', 18)}Ajouter un tome</button>`;
   return h + `</section>`;
 }
+function formatField(it) {
+  const auto = fmtOfRuntime(it.runtime);
+  return `<label class="field"><span>Format des épisodes (XP)</span><select class="input" name="format"><option value="">Automatique · ${auto ? esc(FORMATS[auto].label) + ' · ' + FORMATS[auto].xp + ' XP' : 'durée inconnue · 10 XP'}</option>${Object.entries(FORMATS).map(([k, f]) => `<option value="${k}" ${it.format === k ? 'selected' : ''}>${esc(f.label)} · ${f.xp} XP</option>`).join('')}</select></label>`;
+}
+const filmEvent = (it, n) => state.events.find((e) => e.item === it.id && e.pass === n && e.kind === 'film');
+function cineBtn(it, n) {
+  const ev = filmEvent(it, n); if (!ev || ev.legacy) return '';
+  return `<button class="cine-btn${ev.cine ? ' on' : ''}" data-a="film-cine" data-id="${it.id}" data-v="${n}" aria-pressed="${!!ev.cine}" aria-label="Vu au cinéma">${svgIcon('ticket', 18)}<span>${ev.cine ? 'Cinéma' : 'Ciné ?'}</span></button>`;
+}
+// bonus cinéma : +20 XP, 4 séances par jour au plus avec bonus ; jamais pour le rattrapage ou le surplus du plafond
+function setCine(ev, on) {
+  if (!ev || !!ev.cine === !!on) return;
+  if (on) {
+    ev.cine = true; ev.cineXp = 0;
+    const day = dayOf(ev.ts); const n = state.events.filter((e) => e !== ev && e.cine && e.cineXp && dayOf(e.ts) === day).length;
+    if (!ev.legacy && !ev.capped && n < CINE_MAX_DAY) { ev.cineXp = CINE_XP; ev.xp += CINE_XP; }
+  } else { ev.xp -= ev.cineXp || 0; delete ev.cine; delete ev.cineXp; }
+}
+// « Cette série t'a valu » : bandeau de fin et badges obtenus grâce à cette œuvre
+function itemTrophies(it) {
+  const fin = state.events.find((e) => e.item === it.id && e.kind === 'bonus_serie' && e.pass === curPass(it).n);
+  const won = wonList().filter((w) => w.item === it.id);
+  let h = '';
+  if (fin) h += `<div class="fin-strip">${svgIcon('trophy', 22)}<b class="grow">Série terminée le ${esc(fmtDate(fin.ts))}</b>${fin.xp ? `<span class="gold-t">+${fin.xp} XP</span>` : ''}</div>`;
+  if (won.length) h += `<section class="section">${secHead('Cette ' + (it.type === 'film' ? 'œuvre' : 'série') + ' t’a valu')}<div class="recent">${won.slice(0, 6).map((w) => `<button class="shelf-it" data-a="${w.secret ? 'secret-open' : 'badge-open'}" data-v="${w.secret || w.fam}">${medalHtml(wonIcon(w), wonTier(w), 56)}<span>${esc(wonName(w))}</span><small>${esc(fmtDay(w.ts))}</small></button>`).join('')}</div></section>`;
+  return h;
+}
 function filmBlock(it) {
   const views = it.passes.filter((p) => p.done.v);
   if (!views.length) return '';
   return `<section class="section">${secHead('Visionnages')}<div class="list">${views.map((p, i) => `<div class="lrow"><div class="tx"><b>${i === 0 ? 'Premier visionnage' : 'Revisionnage ' + i}</b><span>${it.catchup && i === 0 ? 'Avant Rewind' : esc(fmtDate(p.done.v))}</span></div>
+      ${cineBtn(it, p.n)}
       <button class="icon-btn" data-a="film-unsee" data-id="${it.id}" data-v="${p.n}" aria-label="Retirer ce visionnage">${svgIcon('x', 18)}</button></div>`).join('')}</div></section>`;
 }
 function jeuBlock(it) {
@@ -1976,12 +2455,12 @@ function withXp(fn, opts) {
 }
 /* Annuler : on garde une copie de l'œuvre et de ses événements juste avant l'action */
 function snapItem(id) {
-  return { id, item: state.items[id] ? JSON.parse(JSON.stringify(state.items[id])) : null, events: state.events.filter((e) => e.item === id).map((e) => Object.assign({}, e)), unlocked: Object.assign({}, state.unlocked), lastLevel: state.lastLevel };
+  return { id, item: state.items[id] ? JSON.parse(JSON.stringify(state.items[id])) : null, events: state.events.filter((e) => e.item === id).map((e) => Object.assign({}, e)), lastLevel: state.lastLevel };
 }
 function restoreItem(s) {
   if (s.item) state.items[s.id] = s.item; else delete state.items[s.id];
   state.events = state.events.filter((e) => e.item !== s.id).concat(s.events);
-  state.unlocked = s.unlocked; state.lastLevel = s.lastLevel;
+  state.lastLevel = s.lastLevel;
   ui.justDone = null; memoClear(); checkUnlocks(true); save(); render();
 }
 function undoToast(text, snap, xp) {
@@ -1995,7 +2474,11 @@ function doNext(it) {
   if (shape(it) === 'jeu') { askJeuDone(it); return; }
   const snap = snapItem(it.id); const label = doneShort(it, nx); const long = doneShort(it, nx, true);
   const from = curPct(it);
-  const xp = withXp(() => { if (shape(it) === 'film' && curPass(it).done.v) newPass(it); setDone(it, nx.key, true); touched(it); }, { quiet: true });
+  const xp = withXp(() => {
+    if (shape(it) === 'film' && curPass(it).done.v) newPass(it); setDone(it, nx.key, true);
+    if (shape(it) === 'film' && ui.cine && ui.cine[it.id]) { setCine(filmEvent(it, curPass(it).n), true); ui.cine[it.id] = false; }
+    touched(it);
+  }, { quiet: true });
   // pendant ~1 s : le bouton montre la confirmation (coche, « Ép. 3 vu », +10 XP), la barre avance depuis l'ancienne valeur
   if (ui.route === 'encours' || ui.route === 'item') {
     ui.justDone = { id: it.id, from, label, xp }; clearTimeout(ui.justT); render();
@@ -2085,6 +2568,7 @@ const ACT = {
       delete p.done.v; state.events = state.events.filter((e) => !(e.item === it.id && e.pass === n));
       if (it.passes.length > 1) { it.passes = it.passes.filter((x) => x.n !== n); it.passes.forEach((x, i) => { state.events.filter((e) => e.item === it.id && e.pass === x.n).forEach((e) => { e.pass = i + 1; }); x.n = i + 1; }); }
       refreshStatus(it); if (!it.passes.some((x) => x.done.v)) it.status = 'envie';
+      sagaBonus(it);
     });
   },
   'jeu-undo'(d) { const it = state.items[d.id]; withXp(() => { setDone(it, 'fin', false); it.status = 'encours'; }); },
@@ -2127,6 +2611,7 @@ const ACT = {
     const it = state.items[d.id]; const sh = shape(it);
     openModal('Modifier', `<form class="col" style="gap:12px" data-form="item-edit" data-id="${it.id}">
       <label class="field"><span>Titre</span><input class="input" name="title" value="${esc(it.title)}" required></label>
+      ${sh === 'episodes' && it.type !== 'catch' ? formatField(it) : ''}
       ${sh === 'episodes' && !(it.src && it.src.api === 'tmdb') ? `<label class="field"><span>Épisodes par saison</span><input class="input" name="seasons" value="${esc(it.seasons.map((s) => s.count).join(', '))}"></label>` : ''}
       ${sh === 'tomes' || sh === 'livre' ? `<label class="field"><span>Nombre de tomes</span><input class="input" name="tomes" type="number" min="1" max="300" value="${it.volumes.length}"></label>` : ''}
       ${sh === 'livre' ? `<label class="field"><span>Pages par tome</span><input class="input" name="pages" type="number" min="0" value="${esc(it.volumes[0] ? it.volumes[0].pages || '' : '')}"></label>` : ''}
@@ -2255,7 +2740,7 @@ const ACT = {
     const a = ui.add; const x = (state.catchFeed[a.fed] || []).find((y) => y.id === d.id); if (!x) return;
     const dt = new Date(x.ts);
     a.cpick = x.id; a.ckind = x.kind; a.cposter = x.poster || '';
-    a.cf = Object.assign(a.cf || {}, { show: x.name, date: dt.getFullYear() + '-' + pad2(dt.getMonth() + 1) + '-' + pad2(dt.getDate()), time: pad2(dt.getHours()) + ':' + pad2(dt.getMinutes()) });
+    a.cf = Object.assign(a.cf || {}, { show: x.name, date: isoDay(dt), time: hhmm(x.ts) });
     render();
   },
   'feds-open'() { fedsModal(); },
@@ -2276,10 +2761,6 @@ const ACT = {
   'env-type'(d) { ui.envies = d.v; render(); },
   'histo-type'(d) { ui.histoF = d.v; render(); },
   'histo-more'() { ui.histoN = (ui.histoN || 14) + 12; render(); },
-  'badges-all'() {
-    const bs = badgeStates().sort((a, b) => (b.won ? 1 : 0) - (a.won ? 1 : 0));
-    openModal('Tous les badges', `<div class="list">${bs.map(badgeRow).join('')}</div><button class="btn block" data-a="modal-close" style="margin-top:12px">Fermer</button>`);
-  },
   'match-confirm'(d) { const m = state.matches[d.id]; openModal('Comment l’as-tu regardé ?', `<div class="col" style="gap:12px"><span style="font-weight:700">${esc(m.home)} – ${esc(m.away)}</span><span class="small muted">${esc(fmtMatch(m.ts))}</span><div class="seg">${Object.keys(MODES).map((k) => `<button data-a="match-seen" data-id="${m.id}" data-mode="${k}">${modeCap(k)}</button>`).join('')}</div><button class="btn block" data-a="match-dismiss" data-id="${m.id}">Je ne l’ai pas vu</button></div>`); },
   'show-confirm'(d) { const x = state.shows[d.id]; openModal('Comment l’as-tu regardé ?', `<div class="col" style="gap:12px"><span style="font-weight:700">${esc(x.name)}</span><span class="small muted">${esc(x.fed)} · ${esc(fmtMatch(x.ts))}</span><div class="seg">${Object.keys(MODES).map((k) => `<button data-a="show-seen" data-id="${x.id}" data-mode="${k}">${modeCap(k)}</button>`).join('')}</div><button class="btn block" data-a="show-dismiss" data-id="${x.id}">Je ne l’ai pas vu</button></div>`); },
   'bib-type'(d) { ui.biblio.type = d.v; render(); if (d.v === 'sport') syncSport(); },
@@ -2306,7 +2787,7 @@ const ACT = {
   },
   export() {
     try {
-      const blob = new Blob([JSON.stringify(state, null, 1)], { type: 'application/json' });
+      const blob = new Blob([exportJson(1)], { type: 'application/json' });
       const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
       a.download = 'rewind-sauvegarde-' + new Date().toISOString().slice(0, 10) + '.json';
       document.body.appendChild(a); a.click(); a.remove();
@@ -2315,17 +2796,43 @@ const ACT = {
     } catch (e) { toast('Export impossible ici. Utilise « Copier les données ».', '', 3500); }
   },
   async 'copy-data'() {
-    try { await navigator.clipboard.writeText(JSON.stringify(state)); state.lastExport = now(); save(); toast('Données copiées dans le presse-papiers'); render(); }
+    try { await navigator.clipboard.writeText(exportJson()); state.lastExport = now(); save(); toast('Données copiées dans le presse-papiers'); render(); }
     catch (e) { toast('Copie impossible ici.', '', 2600); }
   },
   'load-demo'() { loadDemo(); toast('Données de démo chargées'); },
   'clear-demo'() { confirmBox('Effacer la démo ?', 'Toutes les données de démonstration seront supprimées. Tes clés sont conservées.', 'Effacer', () => { resetState(true); closeModal(); }, true); },
   wipe() { confirmBox('Tout effacer ?', 'Toutes tes données (œuvres, historique, XP, badges) seront supprimées de ce téléphone. Exporte une sauvegarde avant si besoin. C’est définitif.', 'Tout effacer', () => { resetState(); closeModal(); }, true); },
   'modal-close'() { closeModal(); },
+  'badge-open'(d) { if (FAM[d.v]) badgeSheet(d.v); },
+  'secret-open'(d) { if (SECRET[d.v]) secretSheet(d.v); },
+  'bdg-type'(d) { ui.bdgF = d.v; render(); },
+  'perso-open'() { persoSheet(); },
+  'pick-title'(d) { state.settings.title = d.v; save(); persoSheet(); },
+  'pick-vit'(d) {
+    const v = state.settings.vitrine || (state.settings.vitrine = []); const i = v.indexOf(d.v);
+    if (i >= 0) v.splice(i, 1); else { if (v.length >= 3) v.shift(); v.push(d.v); }
+    save(); persoSheet();
+  },
+  'pick-banner'(d) { state.settings.banner = d.v; save(); persoSheet(); },
+  'fs-next'(d) {
+    const x = ui.fs && ui.fs.shift(); if (x && x.t === 'recap') { state.recapPending = false; save(); }
+    if (d.v) location.hash = d.v; render();
+    if (!ui.fs.length && ui.cardsLater && ui.cardsLater.length) { badgeCard(ui.cardsLater); ui.cardsLater = null; }
+  },
+  share(d) { shareCard(d.k, d.v).catch(() => toast('Partage impossible ici.', '', 2600)); },
+  'film-cine'(d) {
+    const it = state.items[d.id]; const ev = it && filmEvent(it, +d.v); if (!ev) return;
+    const on = !ev.cine; withXp(() => setCine(ev, on));
+    if (on && !ev.cineXp && !ev.legacy) toast('Déjà 4 séances avec bonus ce jour-là : celle-ci compte pour le badge, sans les +20 XP.', '', 4000);
+  },
   'modal-yes'() { const f = ui.modal && ui.modal.onYes; ui.modal = null; if (f) f(); render(); },
   'modal-bg'(d, el, e) { if (e.target === el) closeModal(); }
 };
 // keepProfile : effacer la démo garde ton pseudo et ta photo ; « Tout effacer » les supprime aussi
+// sauvegarde (Exporter, Copier) : tout sauf les clés TMDB et RAWG, qui restent sur ce téléphone
+function exportJson(indent) {
+  return JSON.stringify(state, (k, v) => (k === 'tmdbKey' || k === 'rawgKey' ? undefined : v), indent);
+}
 function resetState(keepProfile) {
   const s0 = state.settings; const keep = { tmdbKey: s0.tmdbKey, rawgKey: s0.rawgKey };
   if (keepProfile) Object.assign(keep, { pseudo: s0.pseudo || '', avatar: s0.avatar || '', avatarSrc: s0.avatarSrc || '' });
@@ -2450,6 +2957,7 @@ const FORMS = {
     if (fd.has('seasons')) { const c = String(fd.get('seasons')).split(/[,;\s]+/).map(Number).filter((n) => n > 0); if (c.length) it.seasons = c.map((n, i) => Object.assign(it.seasons[i] || { n: i + 1, name: 'Saison ' + (i + 1), eps: null }, { count: n })); }
     if (fd.has('tomes')) { const n = clamp(+fd.get('tomes') || 1, 1, 300); const pages = fd.has('pages') ? +fd.get('pages') || 0 : 0; it.volumes = Array.from({ length: n }, (_, i) => Object.assign({ n: i + 1, pages }, it.volumes[i] || {}, sh === 'livre' && fd.has('pages') ? { pages } : {})); }
     if (sh === 'episodes' || sh === 'tomes' || sh === 'livre') it.ended = !!fd.get('ended');
+    if (fd.has('format')) { if (FORMATS[fd.get('format')]) it.format = fd.get('format'); else delete it.format; }
     withXp(() => touched(it)); closeModal();
   }
 };
@@ -2461,6 +2969,7 @@ function finishAdd(data) {
   Object.assign(ui.add, { results: null, picked: null, manual: false, q: '', error: '', loading: false, catchup: null, tomes: '', pages: '' });
   toast(`<span>${esc(it.title)} ajouté</span>`);
   location.replace('#item-' + it.id);
+  if (it.coll) setTimeout(() => enrichTmdb().catch(() => {}), 500); // charge la saga du film
 }
 
 /* =========================================================
@@ -2482,15 +2991,17 @@ function render() {
     case 'item': html = viewItem(r.arg); break;
     case 'match': html = viewMatch(r.arg); break;
     case 'rewind': html = viewRewind(r.arg); break;
+    case 'badges': html = viewBadges(); break;
     default: html = viewEncours();
   }
   const app = document.getElementById('app');
   app.innerHTML = html + modalHtml();
+  renderFs();
   if (sameRoute) window.scrollTo(0, y); else { window.scrollTo(0, 0); ui.ddOpen = false; }
   lastRouteKey = key;
   const chipOn = app.querySelector('.chips .chip.on');
   if (chipOn && chipOn.parentElement.scrollWidth > chipOn.parentElement.clientWidth) chipOn.parentElement.scrollLeft = chipOn.offsetLeft - chipOn.parentElement.clientWidth / 2 + chipOn.clientWidth / 2;
-  const titles = { encours: 'En cours', biblio: 'Biblio', envies: 'Envies', histo: 'Historique', profil: 'Profil', ajouter: 'Ajouter', rewind: 'Rewind ' + (r.arg || '') };
+  const titles = { badges: 'Badges', encours: 'En cours', biblio: 'Biblio', envies: 'Envies', histo: 'Historique', profil: 'Profil', ajouter: 'Ajouter', rewind: 'Rewind ' + (r.arg || '') };
   document.title = 'Rewind' + (titles[r.route] ? ' · ' + titles[r.route] : r.route === 'item' && state.items[r.arg] ? ' · ' + state.items[r.arg].title : '');
 }
 
@@ -2522,6 +3033,7 @@ document.addEventListener('submit', (e) => {
 document.addEventListener('change', (e) => {
   const el = e.target; const a = el.dataset.change; if (!a) return;
   if (a === 'add-catchup') { ui.add.catchup = el.checked; }
+  if (a === 'cine') { ui.cine = ui.cine || {}; ui.cine[el.dataset.id] = el.checked; }
   if (a === 'poster-file') {
     const file = el.files && el.files[0]; if (!file) return;
     const form = el.closest('form'); const f = el.dataset.field || 'poster';
@@ -2540,7 +3052,11 @@ document.addEventListener('change', (e) => {
       let data; try { data = JSON.parse(txt); } catch (err) { toast('Fichier illisible.', '', 3000); return; }
       if (data && data.rewindPack) { const n = importPack(data); toast(n ? plural(n, 'show') + ' ajouté' + (n > 1 ? 's' : '') : 'Rien de nouveau dans ce fichier', n ? 'gold' : '', 2600); return; }
       if (!data || !data.items || !data.events) { toast('Ce fichier n’est pas une sauvegarde Rewind.', '', 3000); return; }
-      confirmBox('Importer cette sauvegarde ?', `Elle contient ${plural(Object.keys(data.items).length, 'œuvre')} et ${plural(data.events.length, 'événement')}. Tes données actuelles seront remplacées.`, 'Importer', () => { state = migrate(data); checkUnlocks(true); save(); toast('Sauvegarde importée', 'gold'); location.hash = '#encours'; render(); });
+      confirmBox('Importer cette sauvegarde ?', `Elle contient ${plural(Object.keys(data.items).length, 'œuvre')} et ${plural(data.events.length, 'événement')}. Tes données actuelles seront remplacées.`, 'Importer', () => {
+        // les sauvegardes ne contiennent plus les clés : on garde celles de ce téléphone
+        const keys = { tmdbKey: state.settings.tmdbKey, rawgKey: state.settings.rawgKey };
+        state = migrate(data); for (const k in keys) if (!state.settings[k]) state.settings[k] = keys[k];
+        checkUnlocks(true); save(); toast('Sauvegarde importée', 'gold'); location.hash = '#encours'; render(); });
     });
     el.value = '';
   }
@@ -2557,7 +3073,11 @@ document.addEventListener('input', (e) => {
   if (slot) { const none = !!q && !shown; slot.hidden = !none; slot.innerHTML = none ? searchEmptyHtml(raw, slot.dataset.type, slot.dataset.st) : ''; }
 });
 // images qui ne chargent pas : on garde le dégradé
-document.addEventListener('error', (e) => { if (e.target && e.target.tagName === 'IMG') e.target.remove(); }, true);
+document.addEventListener('error', (e) => {
+  const img = e.target; if (!img || img.tagName !== 'IMG') return;
+  const p = img.parentNode; if (p && p.classList && p.classList.contains('has-logo')) p.classList.remove('has-logo');
+  img.remove();
+}, true);
 window.addEventListener('hashchange', () => { if (ui.modal) ui.modal = null; render(); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && ui.modal) closeModal(); });
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flush(); });
@@ -2626,14 +3146,11 @@ async function init() {
   try { await store.open(); } catch (e) { /* repli localStorage */ }
   const saved = await store.get('state');
   if (saved) {
-    // une seule fois : copie de sécurité avant de sortir les images des données
-    if (!saved.imgStore && JSON.stringify(saved).indexOf('"data:image/') !== -1) await store.set('state-backup-2.1', saved);
-    // V3 : copie de sécurité avant la fusion des anime dans les séries et les films
-    if (Object.values(saved.items || {}).some((i) => i.type === 'anime')) await store.set('state-backup-2.3', saved);
     state = migrate(await rehydrate(saved));
   } else seedState();
-  state.imgStore = 1;
+  delete state.imgStore;
   checkUnlocks(true);
+  if (state.recapPending) ui.fs = [{ t: 'recap' }];
   render();
   try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) { /* */ }
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
@@ -2642,6 +3159,7 @@ async function init() {
     navigator.serviceWorker.addEventListener('controllerchange', () => { if (!hadSw || reloading) return; reloading = true; Promise.resolve(flush()).finally(() => location.reload()); });
     navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then((r) => r.update()).catch(() => {});
   }
+  setTimeout(() => enrichTmdb().catch(() => {}), 4000);
   if (navigator.onLine !== false) syncSport().catch(() => {}).then(() => setTimeout(() => syncNba().catch(() => {}), 20000));
   save();
 }
